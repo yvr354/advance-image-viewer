@@ -40,7 +40,24 @@ from src.ui.panels.comparison_panel import ComparisonPanel
 from src.ui.theme import VERDICT_COLOR, COLOR_PERFECT, COLOR_WARN, COLOR_FAIL
 
 
-# ── Background analysis worker ─────────────────────────────────────────────
+# ── Background workers ─────────────────────────────────────────────────────
+
+class ImageLoadWorker(QThread):
+    """Loads image file off UI thread — large TIFFs/BMPs never freeze the window."""
+    loaded  = pyqtSignal(object)   # ImageData
+    failed  = pyqtSignal(str)      # error message
+
+    def __init__(self, path: str):
+        super().__init__()
+        self._path = path
+
+    def run(self):
+        try:
+            data = load_image(self._path)
+            self.loaded.emit(data)
+        except Exception as e:
+            self.failed.emit(str(e))
+
 
 class AnalysisWorker(QThread):
     """Runs focus + quality analysis off the UI thread — never blocks display."""
@@ -69,6 +86,7 @@ class MainWindow(QMainWindow):
         self.folder_images: list[str] = []
         self.folder_index:  int       = -1
         self._analysis_worker: AnalysisWorker | None = None
+        self._load_worker:    ImageLoadWorker | None = None
 
         self.focus_engine   = FocusEngine(
             metric=config.focus_metric,
@@ -105,14 +123,16 @@ class MainWindow(QMainWindow):
         # ── Inspector dock (right) ─────────────────────────────────
         self.inspector = InspectorPanel()
         self._dock_inspector = self._make_dock(
-            "Inspector", self.inspector,
+            "📊  Inspector — Focus / Quality / Histogram",
+            self.inspector,
             Qt.DockWidgetArea.RightDockWidgetArea,
         )
 
         # ── Pipeline dock (bottom) ─────────────────────────────────
         self.pipeline_panel = PipelinePanel(self.pipeline)
         self._dock_pipeline = self._make_dock(
-            "⚙  Processing Pipeline", self.pipeline_panel,
+            "⚙  Processing Pipeline — Filters & Effects",
+            self.pipeline_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
         )
         self._dock_pipeline.setMinimumHeight(200)
@@ -120,14 +140,16 @@ class MainWindow(QMainWindow):
         # ── Browser dock (left) ────────────────────────────────────
         self.browser = BrowserPanel()
         self._dock_browser = self._make_dock(
-            "File Browser", self.browser,
+            "📁  File Browser",
+            self.browser,
             Qt.DockWidgetArea.LeftDockWidgetArea,
         )
 
         # ── 3D Surface dock (right, tabbed with inspector) ─────────
         self.surface_3d = Surface3DPanel()
         self._dock_3d = self._make_dock(
-            "◈  3D Surface View", self.surface_3d,
+            "◈  3D Surface View — Intensity as Height",
+            self.surface_3d,
             Qt.DockWidgetArea.RightDockWidgetArea,
         )
         self.tabifyDockWidget(self._dock_inspector, self._dock_3d)
@@ -136,7 +158,8 @@ class MainWindow(QMainWindow):
         # ── Fusion dock (bottom, tabbed with pipeline) ────────────────
         self.fusion_panel = FusionPanel()
         self._dock_fusion = self._make_dock(
-            "⊕  Illumination Fusion", self.fusion_panel,
+            "⊕  Illumination Fusion — Multi-Light Composite",
+            self.fusion_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
         )
         self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
@@ -160,12 +183,12 @@ class MainWindow(QMainWindow):
 
         # Store all docks for menu toggle
         self._docks = {
-            "Inspector":          self._dock_inspector,
-            "3D Surface View":    self._dock_3d,
-            "Processing Pipeline":self._dock_pipeline,
-            "Illumination Fusion":self._dock_fusion,
-            "Image Comparison":   self._dock_compare,
-            "File Browser":       self._dock_browser,
+            "📊 Inspector":          self._dock_inspector,
+            "◈ 3D Surface View":     self._dock_3d,
+            "⚙ Processing Pipeline": self._dock_pipeline,
+            "⊕ Illumination Fusion": self._dock_fusion,
+            "⊞ Image Comparison":    self._dock_compare,
+            "📁 File Browser":        self._dock_browser,
         }
 
     def _make_dock(self, title: str, widget: QWidget,
@@ -309,25 +332,34 @@ class MainWindow(QMainWindow):
     # ═══════════════════════════════════════════════════════════════
 
     def open_image(self, path: str):
-        try:
-            self.current_image = load_image(path)
-        except Exception as e:
-            QMessageBox.critical(self, "Load Error", str(e))
-            return
+        # Cancel any previous load
+        if self._load_worker and self._load_worker.isRunning():
+            self._load_worker.quit()
+            self._load_worker.wait()
 
-        self.config.add_recent(path)
+        self._status_main.setText(f"  Loading  {os.path.basename(path)} …")
+        self._status_verdict.setText("")
+
+        self._load_worker = ImageLoadWorker(path)
+        self._load_worker.loaded.connect(self._on_image_loaded)
+        self._load_worker.failed.connect(self._on_image_failed)
+        self._load_worker.start()
+
+    def _on_image_loaded(self, data):
+        self.current_image = data
+        self.config.add_recent(data.path)
         self.config.save()
-        self.browser.highlight_path(path)
-
-        # Display immediately — analysis runs in background
+        self.browser.highlight_path(data.path)
         self._display_current()
         self._run_analysis()
-
         self._status_main.setText(
-            f"  {self.current_image.filename}   "
-            f"{self.current_image.shape_str()}"
+            f"  {data.filename}   {data.shape_str()}"
         )
-        self._status_verdict.setText("")
+
+    def _on_image_failed(self, error: str):
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.critical(self, "Load Error", error)
+        self._status_main.setText("  Load failed")
 
     def _display_current(self):
         if not self.current_image.is_loaded():
