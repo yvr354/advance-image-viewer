@@ -319,17 +319,39 @@ class CompareView(QWidget):
         toolbar.addWidget(self._label_b)
         layout.addLayout(toolbar)
 
-        # ── GL Viewers ─────────────────────────────────────────────
+        # ── GL Viewers with zoom labels ────────────────────────────
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        left_wrap  = QWidget()
+        right_wrap = QWidget()
+        for wrap in [left_wrap, right_wrap]:
+            wrap.setLayout(QVBoxLayout())
+            wrap.layout().setContentsMargins(0, 0, 0, 0)
+            wrap.layout().setSpacing(2)
 
         self._viewer_a = GLImageViewer()
         self._viewer_b = GLImageViewer()
         for v in [self._viewer_a, self._viewer_b]:
             v.setMinimumSize(200, 150)
 
-        self._splitter.addWidget(self._viewer_a)
-        self._splitter.addWidget(self._viewer_b)
+        self._zoom_a = QLabel("Zoom: —")
+        self._zoom_b = QLabel("Zoom: —")
+        for lbl in [self._zoom_a, self._zoom_b]:
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet(f"color: {ACCENT}; font-size: 10px; font-weight: 600;")
+
+        left_wrap.layout().addWidget(self._viewer_a)
+        left_wrap.layout().addWidget(self._zoom_a)
+        right_wrap.layout().addWidget(self._viewer_b)
+        right_wrap.layout().addWidget(self._zoom_b)
+
+        self._splitter.addWidget(left_wrap)
+        self._splitter.addWidget(right_wrap)
         layout.addWidget(self._splitter)
+
+        # Zoom display
+        self._viewer_a.zoom_changed.connect(lambda z: self._zoom_a.setText(f"Zoom: {z*100:.0f}%"))
+        self._viewer_b.zoom_changed.connect(lambda z: self._zoom_b.setText(f"Zoom: {z*100:.0f}%"))
 
         # Connect sync: a → b and b → a (set_view_state does not re-emit)
         self._viewer_a.view_state_changed.connect(self._sync_a_to_b)
@@ -656,20 +678,54 @@ class ComparisonPanel(QWidget):
         self.open_image_requested.emit(card.path)
 
     def _on_compare_req(self, card: ImageCard):
-        """Click ＋ Compare → fill slot A then B."""
-        try:
-            data = load_image(card.path)
-            name = os.path.basename(card.path)
-            if self._compare_slots[0] is None:
-                self._compare_slots[0] = card
-                self._compare_view.set_image_a(data.raw, name)
-            else:
-                self._compare_slots[1] = card
-                self._compare_view.set_image_b(data.raw, name)
-                # Reset for next pair
-                self._compare_slots = [None, None]
-        except Exception:
-            pass
+        """
+        Click ＋ Compare on a card:
+          First click  → card highlighted green as A, button shows "✓ A"
+          Second click → auto-loads both A and B, starts comparison
+        """
+        if self._compare_slots[0] is None:
+            # Select as A — highlight card and update button label
+            self._compare_slots[0] = card
+            card._cmp_btn.setText("✓  Selected as A")
+            card._cmp_btn.setStyleSheet(card._cmp_btn.styleSheet().replace(
+                f"color: {ACCENT}", "color: #00E676"
+            ))
+            self._hint.setText(
+                "Image A selected.  Now click  ＋ Compare  on a second image to compare."
+            )
+        else:
+            if card is self._compare_slots[0]:
+                # Clicked same card — deselect
+                self._compare_slots[0] = None
+                card._cmp_btn.setText("＋ Compare")
+                self._hint.setText(
+                    "Load multiple images of the same scene.  "
+                    "Click ＋ Compare on any two to compare them side by side."
+                )
+                return
+
+            # Load both and compare
+            try:
+                a = self._compare_slots[0]
+                data_a = load_image(a.path)
+                data_b = load_image(card.path)
+                self._compare_view.set_image_a(data_a.raw, os.path.basename(a.path))
+                self._compare_view.set_image_b(data_b.raw, os.path.basename(card.path))
+            except Exception:
+                pass
+
+            # Reset card A button label
+            self._compare_slots[0]._cmp_btn.setText("＋ Compare")
+            self._compare_slots[0]._cmp_btn.setStyleSheet(
+                self._compare_slots[0]._cmp_btn.styleSheet().replace(
+                    "color: #00E676", f"color: {ACCENT}"
+                )
+            )
+            self._compare_slots = [None, None]
+            self._hint.setText(
+                "Load multiple images of the same scene.  "
+                "Click ＋ Compare on any two to compare them side by side."
+            )
 
     # ── Export ─────────────────────────────────────────────────────
 

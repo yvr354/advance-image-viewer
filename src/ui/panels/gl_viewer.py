@@ -143,6 +143,11 @@ class GLImageViewer(QOpenGLWidget):
         glMatrixMode(GL_MODELVIEW)
 
     def paintGL(self):
+        # Lazy upload: if image is pending but GL wasn't ready at set_image() time
+        if self._image is not None and self._tex_image == 0:
+            self._upload_image_texture(self._image)
+            self._center()
+
         glClear(GL_COLOR_BUFFER_BIT)
 
         if self._tex_image == 0 or self._img_w == 0:
