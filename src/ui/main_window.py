@@ -91,6 +91,7 @@ class MainWindow(QMainWindow):
         self._active_mode = "Inspect"
         self._last_focus_result = None
         self._last_quality_result = None
+        self._mm_per_px: float = 0.0   # calibration: 0 = not set
 
         self.focus_engine   = FocusEngine(
             metric=config.focus_metric,
@@ -158,6 +159,11 @@ class MainWindow(QMainWindow):
             "border-bottom: 1px solid #25354A; font-weight: 700;"
         )
         image_layout.addWidget(self._mode_banner)
+
+        # ── Inspect tool toolbar (only visible in Inspect mode) ────
+        self._inspect_toolbar = self._build_inspect_toolbar()
+        image_layout.addWidget(self._inspect_toolbar)
+
         self.viewer = GLImageViewer()
         self.viewer.setAcceptDrops(True)
         image_layout.addWidget(self.viewer)
@@ -287,6 +293,82 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._status_zoom)
         self.setStatusBar(sb)
 
+    def _build_inspect_toolbar(self) -> QWidget:
+        """Inspection tool strip — shown only in Inspect mode."""
+        bar = QWidget()
+        bar.setFixedHeight(34)
+        bar.setStyleSheet(
+            "QWidget { background:#0C1520; border-bottom:1px solid #1A2A3A; }"
+            "QPushButton { background:#0A1828; color:#6688AA; border:1px solid #1A2A3A; "
+            "              padding:3px 12px; font-size:10px; font-weight:600; }"
+            "QPushButton:checked { background:#00304A; color:#00E5FF; "
+            "                      border:1px solid #00B4D8; }"
+            "QPushButton:hover:!checked { background:#111F2E; color:#AACCDD; }"
+        )
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(8, 3, 8, 3)
+        row.setSpacing(4)
+
+        self._tool_buttons: dict[str, QPushButton] = {}
+        self._tool_group = QButtonGroup(self)
+        self._tool_group.setExclusive(True)
+
+        tools = [
+            ("navigate", "↖ Navigate", "Pan & zoom — left drag pans, right drag zooms"),
+            ("roi",      "⬛ ROI",       "Draw rectangle → region stats in Inspector"),
+            ("profile",  "📈 Profile",   "Draw line → intensity chart in Inspector"),
+            ("annotate", "📍 Annotate",  "Click to place defect markers"),
+            ("measure",  "↔ Measure",   "Drag to measure distance (px / mm)"),
+        ]
+        for tool_id, label, tip in tools:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _, t=tool_id: self._set_inspect_tool(t))
+            self._tool_group.addButton(btn)
+            self._tool_buttons[tool_id] = btn
+            row.addWidget(btn)
+
+        self._tool_buttons["navigate"].setChecked(True)
+
+        row.addSpacing(12)
+
+        # Scale calibration button
+        self._scale_btn = QPushButton("⚙ Set Scale…")
+        self._scale_btn.setToolTip("Set mm/pixel calibration for Measure tool")
+        self._scale_btn.setCheckable(False)
+        self._scale_btn.setStyleSheet(
+            "QPushButton { background:#0A1828; color:#6688AA; border:1px solid #1A2A3A; "
+            "              padding:3px 10px; font-size:10px; }"
+            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
+        )
+        self._scale_btn.clicked.connect(self._set_scale_calibration)
+        row.addWidget(self._scale_btn)
+
+        row.addSpacing(12)
+
+        # Clear overlays button
+        clear_btn = QPushButton("✕ Clear Overlays")
+        clear_btn.setToolTip("Remove ROI, profile line, measure line, and all annotations")
+        clear_btn.setCheckable(False)
+        clear_btn.setStyleSheet(
+            "QPushButton { background:#0A1828; color:#886666; border:1px solid #2A1A1A; "
+            "              padding:3px 10px; font-size:10px; }"
+            "QPushButton:hover { color:#FF8888; background:#1A1010; }"
+        )
+        clear_btn.clicked.connect(self._clear_inspect_overlays)
+        row.addWidget(clear_btn)
+
+        row.addStretch()
+
+        # Save / load annotation hint
+        ann_lbl = QLabel("Annotations auto-saved alongside image file")
+        ann_lbl.setStyleSheet("color:#2A3A4A; font-size:9px;")
+        row.addWidget(ann_lbl)
+
+        bar.setVisible(False)
+        return bar
+
     # ═══════════════════════════════════════════════════════════════
     #  Signal Wiring — everything connected to everything
     # ═══════════════════════════════════════════════════════════════
@@ -309,6 +391,15 @@ class MainWindow(QMainWindow):
 
         # Comparison panel → open image in main viewer
         self.comparison_panel.open_image_requested.connect(self.open_image)
+
+        # Inspection tool signals → inspector panel updates
+        self.viewer.roi_selected.connect(self._on_roi_selected)
+        self.viewer.line_profile_drawn.connect(self._on_line_profile_drawn)
+        self.viewer.annotation_placed.connect(self._on_annotation_placed)
+        self.viewer.measure_done.connect(self._on_measure_done)
+
+        # Inspector annotation clear button
+        self.inspector._ann_clear_btn.clicked.connect(self._clear_annotations)
 
     # ═══════════════════════════════════════════════════════════════
     #  Menu
@@ -373,6 +464,9 @@ class MainWindow(QMainWindow):
                      lambda: self._set_mode("3D"),    "Ctrl+3")
         self._action(m, "Image Comparison",
                      self._open_comparison_window, "Ctrl+M")
+        m.addSeparator()
+        self._action(m, "Set Scale Calibration (mm/px)…", self._set_scale_calibration)
+        self._action(m, "Clear Inspect Overlays",          self._clear_inspect_overlays)
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
         a = QAction(label, self)
@@ -396,6 +490,11 @@ class MainWindow(QMainWindow):
         self._dock_pipeline.setVisible(False)
         self._dock_fusion.setVisible(False)
         self._dock_focus.setVisible(False)
+
+        # Inspect toolbar only in Inspect mode; switching away resets tool to navigate
+        self._inspect_toolbar.setVisible(mode == "Inspect")
+        if mode != "Inspect":
+            self._set_inspect_tool("navigate")
 
         if mode == "Compare":
             self._workspace.setCurrentWidget(self.comparison_panel)
@@ -481,6 +580,8 @@ class MainWindow(QMainWindow):
         self.config.add_recent(data.path)
         self.config.save()
         self.browser.highlight_path(data.path)
+        self.viewer.clear_tool_overlays()   # clear previous image's overlays
+        self._load_annotations()            # restore saved annotations for this image
         self._display_current()
         self._run_analysis()
         self._status_main.setText(
@@ -605,10 +706,120 @@ class MainWindow(QMainWindow):
 
     def _toggle_focus_grid(self):
         self.viewer._show_focus_grid = not self.viewer._show_focus_grid
-        # When grid turns on, turn heatmap off — they shouldn't overlap
         if self.viewer._show_focus_grid:
             self.viewer._show_heatmap = False
         self.viewer.update()
+
+    # ── Inspect tool handlers ──────────────────────────────────────
+
+    def _set_inspect_tool(self, tool: str):
+        self.viewer.set_tool(tool)
+        if tool in self._tool_buttons:
+            self._tool_buttons[tool].setChecked(True)
+        if tool == "annotate":
+            self.inspector.show_annotation_tools(True)
+        self._status_main.setText(f"  Tool: {tool.upper()}  —  "
+                                   + self._tool_hint(tool))
+
+    def _tool_hint(self, tool: str) -> str:
+        return {
+            "navigate": "left drag = pan  |  right drag = zoom  |  scroll = zoom",
+            "roi":      "left drag to draw region  |  right drag = pan",
+            "profile":  "left drag to draw line  |  right drag = pan",
+            "annotate": "left click to place marker  |  right drag = pan",
+            "measure":  "left drag to measure distance  |  right drag = pan",
+        }.get(tool, "")
+
+    def _on_roi_selected(self, ix1: int, iy1: int, ix2: int, iy2: int):
+        if self.current_image.raw is None:
+            return
+        self.inspector.update_roi_stats(self.current_image.raw, ix1, iy1, ix2, iy2)
+        self._dock_inspector.raise_()
+        self._dock_inspector.setVisible(True)
+
+    def _on_line_profile_drawn(self, ix1: int, iy1: int, ix2: int, iy2: int):
+        if self.current_image.raw is None:
+            return
+        self.inspector.update_line_profile(self.current_image.raw, ix1, iy1, ix2, iy2)
+        self._dock_inspector.raise_()
+        self._dock_inspector.setVisible(True)
+
+    def _on_annotation_placed(self, ix: int, iy: int):
+        labels = ["Scratch", "Pit", "Contamination", "Burr", "Crack", "OK", "Other"]
+        from PyQt6.QtWidgets import QInputDialog
+        label, ok = QInputDialog.getItem(
+            self, "Defect Label",
+            f"Label for annotation at ({ix}, {iy}):",
+            labels, 0, False
+        )
+        if not ok:
+            return
+        self.viewer.add_annotation(ix, iy, label)
+        self.inspector.refresh_annotations(self.viewer.get_annotations())
+        self._save_annotations()
+        self._dock_inspector.raise_()
+        self._dock_inspector.setVisible(True)
+
+    def _on_measure_done(self, ix1: int, iy1: int, ix2: int, iy2: int):
+        self.inspector.update_measurement(ix1, iy1, ix2, iy2, self._mm_per_px)
+        self._dock_inspector.raise_()
+        self._dock_inspector.setVisible(True)
+
+    def _set_scale_calibration(self):
+        from PyQt6.QtWidgets import QInputDialog
+        current = self._mm_per_px if self._mm_per_px > 0 else 0.001
+        val, ok = QInputDialog.getDouble(
+            self, "Set Scale Calibration",
+            "Enter mm per pixel (e.g. 0.00625 means 1px = 6.25 µm):",
+            current, 0.0000001, 100.0, 8
+        )
+        if ok and val > 0:
+            self._mm_per_px = val
+            self.viewer.set_calibration(val)
+            self.inspector.set_calibration_label(val)
+            self._status_main.setText(f"  Scale set: {val:.8f} mm/px")
+
+    def _clear_inspect_overlays(self):
+        self.viewer.clear_tool_overlays()
+        self.viewer.clear_annotations()
+        self.inspector.refresh_annotations([])
+        self._save_annotations()
+        self._status_main.setText("  Overlays and annotations cleared")
+
+    def _clear_annotations(self):
+        self.viewer.clear_annotations()
+        self.inspector.refresh_annotations([])
+        self._save_annotations()
+
+    def _save_annotations(self):
+        """Save annotations to JSON file alongside the image."""
+        if not self.current_image.path:
+            return
+        import json
+        ann_path = self.current_image.path + ".annotations.json"
+        anns = self.viewer.get_annotations()
+        try:
+            with open(ann_path, "w", encoding="utf-8") as f:
+                json.dump(anns, f, indent=2)
+        except Exception:
+            pass
+
+    def _load_annotations(self):
+        """Load annotations from JSON file alongside the image, if it exists."""
+        if not self.current_image.path:
+            return
+        import json
+        ann_path = self.current_image.path + ".annotations.json"
+        try:
+            with open(ann_path, "r", encoding="utf-8") as f:
+                anns = json.load(f)
+            self.viewer.set_annotations(anns)
+            self.inspector.refresh_annotations(anns)
+        except FileNotFoundError:
+            self.viewer.clear_annotations()
+            self.inspector.refresh_annotations([])
+        except Exception:
+            pass
 
     def _refresh_focus_assist(self):
         if self._last_focus_result is not None and self._last_quality_result is not None:
