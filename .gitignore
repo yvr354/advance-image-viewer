@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Build / packaging
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Config (user-specific, contains local paths)
+config.json
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Large test images (don't commit sample images)
+*.tiff
+*.tif
+*.bmp
+*.raw
+
+# PyInstaller
+*.manifest
+
+# Logs
+*.log
