@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QStatusBar, QMenu,
     QFileDialog, QMessageBox, QLabel, QWidget,
     QHBoxLayout, QVBoxLayout, QSizePolicy, QPushButton,
-    QButtonGroup, QStackedWidget,
+    QButtonGroup, QStackedWidget, QFrame,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QKeySequence, QAction, QIcon
@@ -64,14 +64,16 @@ class AnalysisWorker(QThread):
     """Runs focus + quality analysis off the UI thread — never blocks display."""
     finished = pyqtSignal(object, object)   # FocusResult, QualityResult
 
-    def __init__(self, image: np.ndarray, focus: FocusEngine, quality: QualityEngine):
+    def __init__(self, image: np.ndarray, focus: FocusEngine, quality: QualityEngine,
+                 reference=None):
         super().__init__()
-        self._image   = image
-        self._focus   = focus
-        self._quality = quality
+        self._image     = image
+        self._focus     = focus
+        self._quality   = quality
+        self._reference = reference
 
     def run(self):
-        focus_result   = self._focus.analyze(self._image)
+        focus_result   = self._focus.analyze(self._image, self._reference)
         quality_result = self._quality.analyze(self._image)
         self.finished.emit(focus_result, quality_result)
 
@@ -91,7 +93,18 @@ class MainWindow(QMainWindow):
         self._active_mode = "Inspect"
         self._last_focus_result = None
         self._last_quality_result = None
-        self._mm_per_px: float = 0.0   # calibration: 0 = not set
+        self._mm_per_px: float = 0.0
+
+        # Reference system
+        from src.analysis.focus_engine import FocusReference
+        self._focus_reference: FocusReference | None = None   # current reference (auto or locked)
+        self._session_best_raw_lap: float = 0.0               # best raw Laplacian seen this session
+        self._ref_path: str = str(                            # where locked reference is saved
+            config.config_dir / "focus_reference.json"
+            if hasattr(config, "config_dir") else
+            __import__("pathlib").Path.home() / ".vyuhaai_focus_ref.json"
+        )
+        self._load_locked_reference()                          # restore from previous session
 
         self.focus_engine   = FocusEngine(
             metric=config.focus_metric,
@@ -204,21 +217,10 @@ class MainWindow(QMainWindow):
 
         self._dock_inspector.raise_()   # Inspector on top by default
 
-        self._focus_assist = QLabel(
-            "FOCUS ASSIST\n\n"
-            "Open an image to analyze focus.\n\n"
-            "This panel will show the real focus verdict, score, warnings, "
-            "and operator action after analysis completes."
-        )
-        self._focus_assist.setWordWrap(True)
-        self._focus_assist.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._focus_assist.setStyleSheet(
-            "background: #101826; color: #D7F7FF; border: 1px solid #25455E; "
-            "padding: 10px; font-size: 11px; font-weight: 600;"
-        )
+        _focus_dock_widget = self._build_focus_assist_widget()
         self._dock_focus = self._make_dock(
             "Focus Assist",
-            self._focus_assist,
+            _focus_dock_widget,
             Qt.DockWidgetArea.RightDockWidgetArea,
         )
         self.tabifyDockWidget(self._dock_inspector, self._dock_focus)
@@ -270,6 +272,82 @@ class MainWindow(QMainWindow):
         dock.setFeatures(features)
         self.addDockWidget(area, dock)
         return dock
+
+    def _build_focus_assist_widget(self) -> QWidget:
+        """Build the Focus Assist dock: reference buttons + text panel."""
+        _BTN = (
+            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
+            "              padding:3px 8px; font-size:9px; font-weight:600; }"
+            "QPushButton:hover { background:#112233; color:#88CCEE; }"
+            "QPushButton:disabled { color:#334455; }"
+        )
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(4, 4, 4, 4)
+        vl.setSpacing(4)
+
+        # Reference management buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        self._btn_set_ref = QPushButton("📷 Use as Ref")
+        self._btn_set_ref.setToolTip(
+            "Set current image as AUTO reference for this session.\n"
+            "Score = how sharp this image is relative to the current reference.\n"
+            "Auto-ref is reset each session unless you Lock it."
+        )
+        self._btn_set_ref.setEnabled(False)
+        self._btn_set_ref.clicked.connect(self._set_auto_reference)
+
+        self._btn_lock_ref = QPushButton("🔒 Lock Ref")
+        self._btn_lock_ref.setToolTip(
+            "Lock current image as permanent reference (saved to disk).\n"
+            "Survives restarts. Use only with your best known-good image.\n"
+            "LOCKED REF = production-grade scoring."
+        )
+        self._btn_lock_ref.setEnabled(False)
+        self._btn_lock_ref.clicked.connect(self._lock_reference)
+
+        self._btn_clear_ref = QPushButton("✕ Clear")
+        self._btn_clear_ref.setToolTip("Remove reference → return to RELATIVE mode")
+        self._btn_clear_ref.setEnabled(False)
+        self._btn_clear_ref.clicked.connect(self._clear_reference)
+
+        for b in [self._btn_set_ref, self._btn_lock_ref, self._btn_clear_ref]:
+            b.setStyleSheet(_BTN)
+            btn_row.addWidget(b)
+
+        vl.addLayout(btn_row)
+
+        # Reference status label
+        self._ref_status_lbl = QLabel("No reference  —  RELATIVE mode")
+        self._ref_status_lbl.setStyleSheet(
+            "color:#886633; font-size:9px; font-weight:600; padding:2px 2px;"
+        )
+        self._ref_status_lbl.setWordWrap(True)
+        vl.addWidget(self._ref_status_lbl)
+
+        # Divider
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color:#1A2A3A;")
+        vl.addWidget(line)
+
+        # Analysis text
+        self._focus_assist = QLabel(
+            "FOCUS ASSIST\n\n"
+            "Open an image to analyze focus.\n\n"
+            "This panel shows the real focus verdict, score, warnings, "
+            "and operator action after analysis completes."
+        )
+        self._focus_assist.setWordWrap(True)
+        self._focus_assist.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._focus_assist.setStyleSheet(
+            "background: #101826; color: #D7F7FF; border: 1px solid #25455E; "
+            "padding: 10px; font-size: 11px; font-weight: 600;"
+        )
+        vl.addWidget(self._focus_assist, stretch=1)
+        return w
 
     def _build_status_bar(self):
         sb = QStatusBar()
@@ -467,6 +545,10 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._action(m, "Set Scale Calibration (mm/px)…", self._set_scale_calibration)
         self._action(m, "Clear Inspect Overlays",          self._clear_inspect_overlays)
+        m.addSeparator()
+        self._action(m, "Use Current Image as Reference",  self._set_auto_reference)
+        self._action(m, "Lock Current Image as Reference (saved)", self._lock_reference)
+        self._action(m, "Clear Focus Reference",           self._clear_reference)
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
         a = QAction(label, self)
@@ -498,7 +580,7 @@ class MainWindow(QMainWindow):
 
         if mode == "Compare":
             self._workspace.setCurrentWidget(self.comparison_panel)
-            self._dock_browser.setVisible(False)
+            self._dock_browser.setVisible(True)
             self._dock_inspector.setVisible(False)
         elif mode == "3D":
             self._workspace.setCurrentWidget(self.surface_3d)
@@ -506,7 +588,7 @@ class MainWindow(QMainWindow):
             self._dock_inspector.setVisible(False)
         else:
             self._workspace.setCurrentWidget(self._image_page)
-            self._dock_browser.setVisible(mode == "Inspect")
+            self._dock_browser.setVisible(mode in {"Inspect", "Focus"})
             self._dock_inspector.setVisible(mode in {"Inspect", "Focus", "Tune", "Fusion"})
             if mode == "Tune":
                 self._dock_pipeline.setVisible(True)
@@ -517,6 +599,7 @@ class MainWindow(QMainWindow):
             elif mode == "Focus":
                 self._dock_focus.setVisible(True)
                 self._dock_focus.raise_()
+                self._update_ref_status()
                 self._refresh_focus_assist()
 
         # Focus mode: grid on, heatmap off by default (F toggles heatmap, G toggles grid)
@@ -527,9 +610,15 @@ class MainWindow(QMainWindow):
             self.viewer.set_focus_grid_visible(False)
             self.viewer.set_heatmap_visible(False)
         if mode == "Focus":
+            ref = getattr(self, "_focus_reference", None)
+            if ref is None:
+                ref_tag = "⚠ RELATIVE mode — use 'Use as Ref' or 'Lock Ref' for absolute scoring"
+            elif ref.mode == "locked":
+                ref_tag = f"✓ LOCKED REF: {ref.source}"
+            else:
+                ref_tag = f"AUTO-REF: {ref.source}"
             self._mode_banner.setText(
-                "FOCUS MODE  —  Grid shows per-cell sharpness (0–100 relative)  "
-                "·  GREEN=sharp  AMBER=soft  RED=blurry  ·  Press G to toggle grid"
+                f"FOCUS MODE  ·  {ref_tag}  ·  GREEN=sharp  AMBER=soft  RED=blurry  ·  G=grid  F=heatmap"
             )
             self._mode_banner.setVisible(True)
         elif mode == "Inspect":
@@ -583,6 +672,7 @@ class MainWindow(QMainWindow):
         self.viewer.clear_tool_overlays()   # clear previous image's overlays
         self._load_annotations()            # restore saved annotations for this image
         self._display_current()
+        self._update_ref_status()           # enable reference buttons now image is loaded
         self._run_analysis()
         self._status_main.setText(
             f"  {data.filename}   {data.shape_str()}   {self._image_position_text()}"
@@ -615,7 +705,6 @@ class MainWindow(QMainWindow):
         if not self.current_image.is_loaded():
             return
         self._set_focus_assist_analyzing()
-        # Cancel previous worker if still running
         if self._analysis_worker and self._analysis_worker.isRunning():
             self._analysis_worker.quit()
             self._analysis_worker.wait()
@@ -624,6 +713,7 @@ class MainWindow(QMainWindow):
             self.current_image.raw,
             self.focus_engine,
             self.quality_engine,
+            self._focus_reference,
         )
         self._analysis_worker.finished.connect(self._on_analysis_done)
         self._analysis_worker.start()
@@ -634,8 +724,29 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_done(self, focus_result, quality_result):
         """Called from background thread — update all panels with results."""
-        self._last_focus_result = focus_result
+        self._last_focus_result   = focus_result
         self._last_quality_result = quality_result
+
+        # Session best tracking → builds auto-reference only from non-blurry images
+        raw_lap = getattr(focus_result, "raw_lap", 0.0)
+        # Minimum: image must be at least SOFT (absolute score >= 200, raw_lap >= 1000)
+        # A blurry image as reference makes every cell score 100% against garbage — never promote.
+        MIN_REF_LAP = self.focus_engine.SOFT_THRESHOLD * 5  # same scale as score = raw_lap/5
+        if raw_lap > self._session_best_raw_lap:
+            self._session_best_raw_lap = raw_lap
+            if raw_lap >= MIN_REF_LAP and self.current_image.is_loaded():
+                from src.analysis.focus_engine import FocusReference
+                auto_ref = self.focus_engine.make_reference(
+                    self.current_image.raw,
+                    source=self.current_image.filename,
+                    mode="auto",
+                )
+                # Only promote to active reference if no locked reference exists
+                if self._focus_reference is None or \
+                        getattr(self._focus_reference, "mode", "auto") == "auto":
+                    self._focus_reference = auto_ref
+                    self._update_ref_status()
+                    self._reanalyze_with_reference(focus_result)
 
         # Store on image data
         self.current_image.focus_score    = focus_result.score
@@ -645,7 +756,7 @@ class MainWindow(QMainWindow):
         self.current_image.quality_verdict = quality_result.verdict
 
         # Inspector: focus + quality metrics
-        self.inspector.update_focus(focus_result)
+        self.inspector.update_focus(focus_result, self.current_image.filename)
         self.inspector.update_quality(quality_result)
 
         # Viewer: focus heatmap + grid overlay
@@ -825,6 +936,109 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    # ═══════════════════════════════════════════════════════════════
+    #  Reference Management
+    # ═══════════════════════════════════════════════════════════════
+
+    def _load_locked_reference(self):
+        """Try to restore a locked reference from the previous session."""
+        try:
+            ref = __import__("src.analysis.focus_engine", fromlist=["FocusReference"]).FocusReference.load(self._ref_path)
+            if ref.mode == "locked":
+                self._focus_reference = ref
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass   # corrupt file — ignore silently
+
+    def _reanalyze_with_reference(self, _prev=None):
+        """Re-run analysis with the current reference (called after reference changes)."""
+        if self.current_image.is_loaded():
+            self._run_analysis()
+
+    def _set_auto_reference(self):
+        """Use current image as the auto-reference for this session."""
+        if not self.current_image.is_loaded():
+            return
+        ref = self.focus_engine.make_reference(
+            self.current_image.raw,
+            source=self.current_image.filename,
+            mode="auto",
+        )
+        self._focus_reference = ref
+        self._session_best_raw_lap = getattr(
+            self._last_focus_result, "raw_lap", self._session_best_raw_lap
+        ) if self._last_focus_result else self._session_best_raw_lap
+        self._update_ref_status()
+        self._reanalyze_with_reference()
+        self._status_main.setText(
+            f"  Reference set to: {self.current_image.filename} (AUTO)"
+        )
+
+    def _lock_reference(self):
+        """Lock current image as permanent reference — saves to disk, survives restarts."""
+        if not self.current_image.is_loaded():
+            return
+        ref = self.focus_engine.make_reference(
+            self.current_image.raw,
+            source=self.current_image.filename,
+            mode="locked",
+        )
+        self._focus_reference = ref
+        try:
+            ref.save(self._ref_path)
+            msg = f"  Locked reference saved: {self.current_image.filename}"
+        except Exception as e:
+            msg = f"  Lock saved in memory (disk write failed: {e})"
+        self._update_ref_status()
+        self._reanalyze_with_reference()
+        self._status_main.setText(msg)
+
+    def _clear_reference(self):
+        """Remove reference — return to RELATIVE scoring mode."""
+        self._focus_reference = None
+        self._session_best_raw_lap = 0.0
+        import os as _os
+        try:
+            if _os.path.exists(self._ref_path):
+                _os.remove(self._ref_path)
+        except Exception:
+            pass
+        self._update_ref_status()
+        self._reanalyze_with_reference()
+        self._status_main.setText("  Reference cleared — RELATIVE mode")
+
+    def _update_ref_status(self):
+        """Update the reference status label and button states in Focus Assist dock."""
+        ref = self._focus_reference
+        has_image = self.current_image.is_loaded()
+
+        # Button enable states
+        self._btn_set_ref.setEnabled(has_image)
+        self._btn_lock_ref.setEnabled(has_image)
+        self._btn_clear_ref.setEnabled(ref is not None)
+
+        if ref is None:
+            self._ref_status_lbl.setText("No reference  —  RELATIVE mode")
+            self._ref_status_lbl.setStyleSheet(
+                "color:#886633; font-size:9px; font-weight:600; padding:2px;"
+            )
+        elif ref.mode == "locked":
+            ts = ref.locked_at[:10] if ref.locked_at else "?"
+            self._ref_status_lbl.setText(
+                f"✓ LOCKED REF  {ref.source}  ({ts})"
+            )
+            self._ref_status_lbl.setStyleSheet(
+                "color:#00AA66; font-size:9px; font-weight:600; padding:2px;"
+            )
+        else:
+            self._ref_status_lbl.setText(
+                f"AUTO-REF  {ref.source}  (session best)"
+            )
+            self._ref_status_lbl.setStyleSheet(
+                "color:#5599BB; font-size:9px; font-weight:600; padding:2px;"
+            )
+
     def _refresh_focus_assist(self):
         if self._last_focus_result is not None and self._last_quality_result is not None:
             self._update_focus_assist(self._last_focus_result, self._last_quality_result)
@@ -853,6 +1067,25 @@ class MainWindow(QMainWindow):
         v  = focus_result.verdict
         g  = focus_result.grid
         q  = quality_result.overall_score
+
+        # Scoring mode header
+        mode = getattr(focus_result, "scoring_mode", "RELATIVE")
+        conf = getattr(focus_result, "confidence",   "LOW")
+        ref_pct = getattr(focus_result, "ref_pct",   0.0)
+        r_src   = getattr(focus_result, "ref_source", "")
+        is_self_ref = (mode != "RELATIVE" and r_src
+                       and self.current_image.filename == r_src)
+        if is_self_ref:
+            mode_line = (
+                f"⚠ THIS IS THE REFERENCE IMAGE ({r_src})\n"
+                "   Score vs itself = 100% — meaningless. Trust the Verdict + Score above."
+            )
+        elif mode == "LOCKED_REF":
+            mode_line = f"MODE: LOCKED REF ({r_src})  ·  {ref_pct:.1f}% of reference"
+        elif mode == "AUTO_REF":
+            mode_line = f"MODE: AUTO-REF ({r_src})  ·  {ref_pct:.1f}% of session best"
+        else:
+            mode_line = "MODE: RELATIVE  ⚠  Cannot confirm absolute sharpness"
 
         # Grid statistics block
         grid_block = (
@@ -905,9 +1138,10 @@ class MainWindow(QMainWindow):
 
         self._focus_assist.setText(
             f"FOCUS ASSIST\n\n"
-            f"Verdict : {v}\n"
+            f"Verdict : {v}   [{conf} confidence]\n"
             f"Score   : {focus_result.score:.0f}  (Laplacian+Tenengrad fusion)\n"
-            f"Quality : {q:.0f}/100  ({quality_result.verdict})\n\n"
+            f"Quality : {q:.0f}/100  ({quality_result.verdict})\n"
+            f"{mode_line}\n\n"
             f"{grid_block}"
             f"{tilt_block}\n\n"
             f"{action}"
