@@ -1,4 +1,4 @@
-# YVR Advanced Image Viewer
+# VyuhaAI Image Viewer
 
 Professional-grade image acquisition and defect visualization tool for industrial vision engineers.
 
