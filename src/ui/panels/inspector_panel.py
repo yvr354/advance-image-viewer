@@ -141,7 +141,7 @@ class InspectorPanel(QScrollArea):
         self._hist_widget.setBackground("#1a1a1a")
         self._hist_widget.setFixedHeight(100)
         self._hist_widget.getAxis("left").hide()
-        self._hist_widget.getAxis("bottom").setStyle(tickTextSize=7)
+        self._hist_widget.getAxis("bottom").setStyle(tickFont=None)
         self._hist_widget.setMouseEnabled(False, False)
         layout.addWidget(self._hist_widget)
 

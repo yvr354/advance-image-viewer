@@ -24,7 +24,6 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_ORG)
-    app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
     app.setStyleSheet(get_stylesheet())
 
     if os.path.exists(LOGO_PATH):
