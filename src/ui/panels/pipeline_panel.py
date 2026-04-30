@@ -119,18 +119,50 @@ class PipelinePanel(QWidget):
     def _build(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
         # Toolbar
         toolbar = QHBoxLayout()
         btn_add = QPushButton("+ Add Filter")
         btn_add.clicked.connect(self._show_add_menu)
+        btn_add.setToolTip("Add a processing filter to the pipeline")
         btn_clear = QPushButton("Clear All")
         btn_clear.clicked.connect(self._clear_all)
         btn_clear.setStyleSheet("color: #ff5252;")
         toolbar.addWidget(btn_add)
         toolbar.addWidget(btn_clear)
         toolbar.addStretch()
+
+        # Quick-add buttons for most-used filters
+        for label, filter_name in [
+            ("Sharpen", "Unsharp Mask"),
+            ("Denoise", "Bilateral Filter"),
+            ("Contrast", "CLAHE"),
+            ("Brightness", "Brightness / Contrast"),
+            ("Edge Detect", "Canny Edge"),
+        ]:
+            btn = QPushButton(label)
+            btn.setStyleSheet(
+                "QPushButton { background:#1a2a3a; color:#00B4D8; "
+                "border:1px solid #00B4D8; border-radius:3px; padding:2px 6px; font-size:10px;}"
+                "QPushButton:hover { background:#003344; }"
+            )
+            btn.setToolTip(f"Quick-add {label} filter")
+            btn.clicked.connect(lambda _, n=filter_name: self._quick_add(n))
+            toolbar.addWidget(btn)
+
         layout.addLayout(toolbar)
+
+        # Empty-state hint shown when no filters are active
+        self._empty_label = QLabel(
+            "No filters active.\n"
+            "Click  + Add Filter  or use the quick buttons above to start processing."
+        )
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet(
+            "color: #444455; font-size: 11px; padding: 20px;"
+        )
+        layout.addWidget(self._empty_label)
 
         # Scrollable layer list
         self._scroll = QScrollArea()
@@ -140,7 +172,22 @@ class PipelinePanel(QWidget):
         self._scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._scroll_layout.setSpacing(4)
         self._scroll.setWidget(self._scroll_widget)
+        self._scroll.setVisible(False)   # hidden until first filter added
         layout.addWidget(self._scroll)
+
+    def _update_empty_state(self):
+        has_filters = len(self._layer_widgets) > 0
+        self._empty_label.setVisible(not has_filters)
+        self._scroll.setVisible(has_filters)
+
+    def _quick_add(self, filter_name: str):
+        """Add a filter by name — used by quick-add toolbar buttons."""
+        from src.pipeline.filter_registry import FILTER_CATEGORIES
+        for filters in FILTER_CATEGORIES.values():
+            for cls in filters:
+                if cls.NAME == filter_name:
+                    self._add_filter(cls())
+                    return
 
     def _show_add_menu(self):
         menu = QMenu(self)
@@ -154,6 +201,7 @@ class PipelinePanel(QWidget):
     def _add_filter(self, filter_instance: BaseFilter):
         self.pipeline.add(filter_instance)
         self._add_layer_widget(filter_instance)
+        self._update_empty_state()
         self.pipeline_changed.emit()
 
     def _add_layer_widget(self, filter_instance: BaseFilter):
@@ -171,6 +219,7 @@ class PipelinePanel(QWidget):
         self._layer_widgets.pop(idx)
         self._scroll_layout.removeWidget(widget)
         widget.deleteLater()
+        self._update_empty_state()
         self.pipeline_changed.emit()
 
     def _move_up(self, widget: FilterLayerWidget):
@@ -203,6 +252,7 @@ class PipelinePanel(QWidget):
             w.deleteLater()
         self._layer_widgets.clear()
         self.pipeline.clear()
+        self._update_empty_state()
         self.pipeline_changed.emit()
 
     def refresh(self):
@@ -213,3 +263,4 @@ class PipelinePanel(QWidget):
         self._layer_widgets.clear()
         for layer in self.pipeline.layers:
             self._add_layer_widget(layer)
+        self._update_empty_state()

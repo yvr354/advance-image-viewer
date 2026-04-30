@@ -134,8 +134,8 @@ class InspectorPanel(QScrollArea):
     # ------------------------------------------------------------------ #
 
     def _build_histogram_group(self):
-        box = QGroupBox("Histogram")
-        layout = QVBoxLayout(box)
+        self._hist_group = QGroupBox("Histogram")
+        layout = QVBoxLayout(self._hist_group)
 
         self._hist_widget = pg.PlotWidget()
         self._hist_widget.setBackground("#1a1a1a")
@@ -145,7 +145,7 @@ class InspectorPanel(QScrollArea):
         self._hist_widget.setMouseEnabled(False, False)
         layout.addWidget(self._hist_widget)
 
-        self._layout.addWidget(box)
+        self._layout.addWidget(self._hist_group)
         self._hist_visible = True
 
     def update_histogram(self, hist_data: dict):
@@ -159,6 +159,7 @@ class InspectorPanel(QScrollArea):
 
     def toggle_histogram(self):
         self._hist_visible = not self._hist_visible
+        self._hist_group.setVisible(self._hist_visible)
 
     # ------------------------------------------------------------------ #
     #  Pixel inspector
@@ -195,11 +196,23 @@ class InspectorPanel(QScrollArea):
             self._px_b.setText(f"B: {b}")
             gray = int(0.299 * r + 0.587 * g + 0.114 * b)
             self._px_gray.setText(f"Gray: {gray}")
-            self._px_swatch.setStyleSheet(f"background: rgb({r},{g},{b}); border: 1px solid #555;")
+            sr, sg, sb = self._display_rgb(r, g, b)
+            self._px_swatch.setStyleSheet(f"background: rgb({sr},{sg},{sb}); border: 1px solid #555;")
         else:
             v = int(pixel) if not hasattr(pixel, "__len__") else int(pixel[0])
             self._px_gray.setText(f"Val: {v}")
             self._px_r.setText("")
             self._px_g.setText("")
             self._px_b.setText("")
-            self._px_swatch.setStyleSheet(f"background: rgb({v},{v},{v}); border: 1px solid #555;")
+            sv = self._display_channel(v)
+            self._px_swatch.setStyleSheet(f"background: rgb({sv},{sv},{sv}); border: 1px solid #555;")
+
+    @staticmethod
+    def _display_channel(value: int) -> int:
+        if value > 255:
+            value = value >> 8
+        return max(0, min(int(value), 255))
+
+    @classmethod
+    def _display_rgb(cls, r: int, g: int, b: int) -> tuple[int, int, int]:
+        return cls._display_channel(r), cls._display_channel(g), cls._display_channel(b)

@@ -39,7 +39,7 @@ def main():
 
     # Open file passed as argument (e.g. double-click on image)
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        window.open_image(sys.argv[1])
+        window.open_image_with_context(sys.argv[1])
 
     sys.exit(app.exec())
 

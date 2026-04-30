@@ -769,8 +769,12 @@ class ComparisonPanel(QWidget):
         self._hint.setWordWrap(True)
         layout.addWidget(self._hint)
 
-        # ── Splitter: cards on top, compare view on bottom ─────────
+        # ── Splitter: compare workspace first, supporting cards below ──
         splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # Compare view
+        self._compare_view = CompareView()
+        self._compare_view.setMinimumHeight(420)
 
         # Card scroll area
         self._card_scroll = QScrollArea()
@@ -782,15 +786,11 @@ class ComparisonPanel(QWidget):
         self._cards_layout.setSpacing(10)
         self._cards_layout.setContentsMargins(4, 4, 4, 4)
         self._card_scroll.setWidget(self._cards_widget)
-        self._card_scroll.setMinimumHeight(320)
+        self._card_scroll.setMinimumHeight(150)
 
-        # Compare view
-        self._compare_view = CompareView()
-        self._compare_view.setMinimumHeight(220)
-
-        splitter.addWidget(self._card_scroll)
         splitter.addWidget(self._compare_view)
-        splitter.setSizes([340, 240])
+        splitter.addWidget(self._card_scroll)
+        splitter.setSizes([700, 180])
         layout.addWidget(splitter)
 
     # ── Load & analyze ─────────────────────────────────────────────

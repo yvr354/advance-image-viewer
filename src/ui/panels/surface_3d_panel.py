@@ -11,9 +11,10 @@ import numpy as np
 import cv2
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QSlider, QComboBox, QCheckBox,
+    QLabel, QSlider, QComboBox, QCheckBox, QSplitter,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QImage, QPixmap
 import pyqtgraph.opengl as gl
 
 from src.ui.tooltips import TIP
@@ -155,15 +156,37 @@ class Surface3DPanel(QWidget):
         ctrl.addWidget(self._reset_btn)
         layout.addLayout(ctrl)
 
+        work = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(work, stretch=1)
+
         # 3D viewport
         self._view = gl.GLViewWidget()
         self._view.setBackgroundColor("#0A0A0F")
-        self._view.setCameraPosition(distance=200, elevation=30, azimuth=45)
-        layout.addWidget(self._view)
+        self._view.setCameraPosition(distance=145, elevation=24, azimuth=42)
+        work.addWidget(self._view)
 
         grid = gl.GLGridItem()
         grid.setColor((40, 40, 60, 80))
         self._view.addItem(grid)
+
+        ref_panel = QWidget()
+        ref_layout = QVBoxLayout(ref_panel)
+        ref_layout.setContentsMargins(8, 0, 0, 0)
+        ref_layout.setSpacing(6)
+        self._ref_title = QLabel("Original Image")
+        self._ref_title.setStyleSheet("color: #8888AA; font-size: 10px; font-weight: 700;")
+        self._ref_image = QLabel("Load an image")
+        self._ref_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._ref_image.setMinimumWidth(280)
+        self._ref_image.setStyleSheet("background: #0A0A0F; border: 1px solid #252535;")
+        self._ref_meta = QLabel("")
+        self._ref_meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._ref_meta.setStyleSheet("color: #44445A; font-size: 10px;")
+        ref_layout.addWidget(self._ref_title)
+        ref_layout.addWidget(self._ref_image, stretch=1)
+        ref_layout.addWidget(self._ref_meta)
+        work.addWidget(ref_panel)
+        work.setSizes([1400, 360])
 
         self._info = QLabel("Load an image — surface renders here.  Drag=Rotate  Scroll=Zoom")
         self._info.setStyleSheet("color: #44445A; font-size: 10px;")
@@ -174,6 +197,7 @@ class Surface3DPanel(QWidget):
 
     def set_image(self, image: np.ndarray):
         self._image = image
+        self._update_reference()
         self._schedule_update()
 
     def clear(self):
@@ -228,4 +252,40 @@ class Surface3DPanel(QWidget):
         self._info.setText(info)
 
     def _reset_view(self):
-        self._view.setCameraPosition(distance=200, elevation=30, azimuth=45)
+        self._view.setCameraPosition(distance=145, elevation=24, azimuth=42)
+
+    def _update_reference(self):
+        if self._image is None:
+            return
+        img8 = self._to_preview_8bit(self._image)
+        if img8.ndim == 2:
+            h, w = img8.shape
+            qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            h, w = img8.shape[:2]
+            qimg = QImage(img8.data, w, h, w * 3, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg.copy())
+        self._ref_image.setPixmap(
+            pixmap.scaled(
+                self._ref_image.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        dtype = "16-bit" if self._image.dtype == np.uint16 else "8-bit"
+        channels = "Gray" if self._image.ndim == 2 else f"{self._image.shape[2]} ch"
+        self._ref_meta.setText(f"{w} x {h}   {dtype}   {channels}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_reference()
+
+    @staticmethod
+    def _to_preview_8bit(image: np.ndarray) -> np.ndarray:
+        if image.dtype == np.uint16:
+            image = (image >> 8).astype(np.uint8)
+        elif image.dtype != np.uint8:
+            image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        if image.ndim == 3 and image.shape[2] > 3:
+            image = image[:, :, :3]
+        return np.ascontiguousarray(image)

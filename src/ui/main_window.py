@@ -18,7 +18,8 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QStatusBar, QMenu,
     QFileDialog, QMessageBox, QLabel, QWidget,
-    QHBoxLayout, QSizePolicy,
+    QHBoxLayout, QVBoxLayout, QSizePolicy, QPushButton,
+    QButtonGroup, QStackedWidget,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QKeySequence, QAction, QIcon
@@ -87,6 +88,9 @@ class MainWindow(QMainWindow):
         self.folder_index:  int       = -1
         self._analysis_worker: AnalysisWorker | None = None
         self._load_worker:    ImageLoadWorker | None = None
+        self._active_mode = "Inspect"
+        self._last_focus_result = None
+        self._last_quality_result = None
 
         self.focus_engine   = FocusEngine(
             metric=config.focus_metric,
@@ -116,9 +120,56 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("VyuhaAI Image Viewer")
 
         # ── Central widget: OpenGL viewer ──────────────────────────
+        # Central workspace: one active mode owns the main visual area.
+        self._central_root = QWidget()
+        central_layout = QVBoxLayout(self._central_root)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+
+        self._mode_buttons: dict[str, QPushButton] = {}
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        mode_bar = QHBoxLayout()
+        mode_bar.setContentsMargins(8, 4, 8, 4)
+        mode_bar.setSpacing(6)
+        for mode in ["Inspect", "Focus", "Compare", "Tune", "Fusion", "3D"]:
+            btn = QPushButton(mode)
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            btn.clicked.connect(lambda checked, m=mode: self._set_mode(m))
+            self._mode_group.addButton(btn)
+            self._mode_buttons[mode] = btn
+            mode_bar.addWidget(btn)
+        mode_bar.addStretch()
+        central_layout.addLayout(mode_bar)
+
+        self._workspace = QStackedWidget()
+        central_layout.addWidget(self._workspace, stretch=1)
+
+        self._image_page = QWidget()
+        image_layout = QVBoxLayout(self._image_page)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        image_layout.setSpacing(4)
+        self._mode_banner = QLabel("")
+        self._mode_banner.setFixedHeight(30)
+        self._mode_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._mode_banner.setStyleSheet(
+            "background: #101826; color: #00D4F8; "
+            "border-bottom: 1px solid #25354A; font-weight: 700;"
+        )
+        image_layout.addWidget(self._mode_banner)
         self.viewer = GLImageViewer()
         self.viewer.setAcceptDrops(True)
-        self.setCentralWidget(self.viewer)
+        image_layout.addWidget(self.viewer)
+        self._workspace.addWidget(self._image_page)
+
+        self.comparison_panel = ComparisonPanel()
+        self._workspace.addWidget(self.comparison_panel)
+
+        self.surface_3d = Surface3DPanel()
+        self._workspace.addWidget(self.surface_3d)
+
+        self.setCentralWidget(self._central_root)
 
         # ── Inspector dock (right) ─────────────────────────────────
         self.inspector = InspectorPanel()
@@ -145,15 +196,26 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.LeftDockWidgetArea,
         )
 
-        # ── 3D Surface dock (right, tabbed with inspector) ─────────
-        self.surface_3d = Surface3DPanel()
-        self._dock_3d = self._make_dock(
-            "◈  3D Surface View — Intensity as Height",
-            self.surface_3d,
+        self._dock_inspector.raise_()   # Inspector on top by default
+
+        self._focus_assist = QLabel(
+            "FOCUS ASSIST\n\n"
+            "Open an image to analyze focus.\n\n"
+            "This panel will show the real focus verdict, score, warnings, "
+            "and operator action after analysis completes."
+        )
+        self._focus_assist.setWordWrap(True)
+        self._focus_assist.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._focus_assist.setStyleSheet(
+            "background: #101826; color: #D7F7FF; border: 1px solid #25455E; "
+            "padding: 10px; font-size: 11px; font-weight: 600;"
+        )
+        self._dock_focus = self._make_dock(
+            "Focus Assist",
+            self._focus_assist,
             Qt.DockWidgetArea.RightDockWidgetArea,
         )
-        self.tabifyDockWidget(self._dock_inspector, self._dock_3d)
-        self._dock_inspector.raise_()   # Inspector on top by default
+        self.tabifyDockWidget(self._dock_inspector, self._dock_focus)
 
         # ── Fusion dock (bottom, tabbed with pipeline) ────────────────
         self.fusion_panel = FusionPanel()
@@ -164,19 +226,11 @@ class MainWindow(QMainWindow):
         )
         self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
 
-        # ── Comparison dock (floatable — opens as window via Ctrl+M) ─
-        self.comparison_panel = ComparisonPanel()
-        self._dock_compare = self._make_dock(
-            "⊞  Image Comparison", self.comparison_panel,
-            Qt.DockWidgetArea.BottomDockWidgetArea,
-            floatable=True,
-        )
-        self.tabifyDockWidget(self._dock_pipeline, self._dock_compare)
         self._dock_pipeline.raise_()
 
-        # All bottom docks: enforce minimum height so they can never collapse
-        for dock in [self._dock_pipeline, self._dock_fusion, self._dock_compare]:
-            dock.setMinimumHeight(200)
+        # Bottom docks: allow user to resize freely (min 80px = just the tab strip)
+        for dock in [self._dock_pipeline, self._dock_fusion]:
+            dock.setMinimumHeight(80)
 
         # ── Status bar ─────────────────────────────────────────────
         self._build_status_bar()
@@ -184,12 +238,12 @@ class MainWindow(QMainWindow):
         # Store all docks for menu toggle
         self._docks = {
             "📊 Inspector":          self._dock_inspector,
-            "◈ 3D Surface View":     self._dock_3d,
+            "🎯 Focus Assist":       self._dock_focus,
             "⚙ Processing Pipeline": self._dock_pipeline,
             "⊕ Illumination Fusion": self._dock_fusion,
-            "⊞ Image Comparison":    self._dock_compare,
             "📁 File Browser":        self._dock_browser,
         }
+        self._set_mode("Inspect")
 
     def _make_dock(self, title: str, widget: QWidget,
                    area: Qt.DockWidgetArea,
@@ -308,10 +362,10 @@ class MainWindow(QMainWindow):
         # ── Tools ──────────────────────────────────────────────────
         m = mb.addMenu("&Tools")
         self._action(m, "Illumination Fusion",
-                     lambda: self._toggle_dock(self._dock_fusion), "Ctrl+F")
+                     lambda: self._set_mode("Fusion"), "Ctrl+F")
         self._action(m, "3D Surface View",
-                     lambda: self._toggle_dock(self._dock_3d),    "Ctrl+3")
-        self._action(m, "Image Comparison  (floating window)",
+                     lambda: self._set_mode("3D"),    "Ctrl+3")
+        self._action(m, "Image Comparison",
                      self._open_comparison_window, "Ctrl+M")
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
@@ -326,6 +380,57 @@ class MainWindow(QMainWindow):
         dock.setVisible(not dock.isVisible())
         if dock.isVisible():
             dock.raise_()
+
+    def _set_mode(self, mode: str):
+        """Switch production workspaces without making users manage docks."""
+        self._active_mode = mode
+        for name, btn in self._mode_buttons.items():
+            btn.setChecked(name == mode)
+
+        self._dock_pipeline.setVisible(False)
+        self._dock_fusion.setVisible(False)
+        self._dock_focus.setVisible(False)
+
+        if mode == "Compare":
+            self._workspace.setCurrentWidget(self.comparison_panel)
+            self._dock_browser.setVisible(False)
+            self._dock_inspector.setVisible(False)
+        elif mode == "3D":
+            self._workspace.setCurrentWidget(self.surface_3d)
+            self._dock_browser.setVisible(False)
+            self._dock_inspector.setVisible(False)
+        else:
+            self._workspace.setCurrentWidget(self._image_page)
+            self._dock_browser.setVisible(mode == "Inspect")
+            self._dock_inspector.setVisible(mode in {"Inspect", "Focus", "Tune", "Fusion"})
+            if mode == "Tune":
+                self._dock_pipeline.setVisible(True)
+                self._dock_pipeline.raise_()
+            elif mode == "Fusion":
+                self._dock_fusion.setVisible(True)
+                self._dock_fusion.raise_()
+            elif mode == "Focus":
+                self._dock_focus.setVisible(True)
+                self._dock_focus.raise_()
+                self._refresh_focus_assist()
+
+        self.viewer.set_heatmap_visible(mode == "Focus")
+        if mode == "Focus":
+            self._mode_banner.setText("FOCUS MODE - heatmap overlay active, tune lens/camera until important regions turn green")
+            self._mode_banner.setVisible(True)
+        elif mode == "Inspect":
+            self._mode_banner.setText("")
+            self._mode_banner.setVisible(False)
+        elif mode == "Tune":
+            self._mode_banner.setText("TUNE MODE - filter controls are active, processed image stays in the center")
+            self._mode_banner.setVisible(True)
+        elif mode == "Fusion":
+            self._mode_banner.setText("FUSION MODE - build multi-light composite, result shows in the center")
+            self._mode_banner.setVisible(True)
+        else:
+            self._mode_banner.setVisible(False)
+
+        self._status_main.setText(f"  {mode} mode")
 
     # ═══════════════════════════════════════════════════════════════
     #  Image Loading
@@ -345,15 +450,26 @@ class MainWindow(QMainWindow):
         self._load_worker.failed.connect(self._on_image_failed)
         self._load_worker.start()
 
+    def open_image_with_context(self, path: str):
+        """Open an image and load its folder so navigation works."""
+        folder = os.path.dirname(path)
+        self.config.last_folder = folder
+        self.folder_images = list_images_in_folder(folder)
+        self.folder_index = self.folder_images.index(path) if path in self.folder_images else -1
+        self.browser.set_folder(folder)
+        self.open_image(path)
+
     def _on_image_loaded(self, data):
         self.current_image = data
+        self._last_focus_result = None
+        self._last_quality_result = None
         self.config.add_recent(data.path)
         self.config.save()
         self.browser.highlight_path(data.path)
         self._display_current()
         self._run_analysis()
         self._status_main.setText(
-            f"  {data.filename}   {data.shape_str()}"
+            f"  {data.filename}   {data.shape_str()}   {self._image_position_text()}"
         )
 
     def _on_image_failed(self, error: str):
@@ -361,7 +477,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Load Error", error)
         self._status_main.setText("  Load failed")
 
-    def _display_current(self):
+    def _display_current(self, preserve_view: bool = False):
         if not self.current_image.is_loaded():
             return
 
@@ -370,7 +486,7 @@ class MainWindow(QMainWindow):
         self.current_image.display = processed
 
         # Update OpenGL viewer — GPU upload, instant display
-        self.viewer.set_image(processed)
+        self.viewer.set_image(processed, preserve_view=preserve_view)
 
         # Update 3D surface with processed image
         self.surface_3d.set_image(processed)
@@ -382,6 +498,7 @@ class MainWindow(QMainWindow):
     def _run_analysis(self):
         if not self.current_image.is_loaded():
             return
+        self._set_focus_assist_analyzing()
         # Cancel previous worker if still running
         if self._analysis_worker and self._analysis_worker.isRunning():
             self._analysis_worker.quit()
@@ -401,6 +518,9 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_done(self, focus_result, quality_result):
         """Called from background thread — update all panels with results."""
+        self._last_focus_result = focus_result
+        self._last_quality_result = quality_result
+
         # Store on image data
         self.current_image.focus_score    = focus_result.score
         self.current_image.focus_verdict  = focus_result.verdict
@@ -418,10 +538,11 @@ class MainWindow(QMainWindow):
 
         # Status bar: color-coded verdict
         self._update_status_verdict(focus_result, quality_result)
+        self._update_focus_assist(focus_result, quality_result)
 
     def _on_pipeline_changed(self):
         """Pipeline layer added/removed/changed → re-process and update all views."""
-        self._display_current()
+        self._display_current(preserve_view=True)
 
     def _on_composite_ready(self, composite: np.ndarray):
         """Fusion panel produced a composite → show in viewer and 3D."""
@@ -450,7 +571,7 @@ class MainWindow(QMainWindow):
 
         self._status_main.setText(
             f"  {self.current_image.filename}   "
-            f"{self.current_image.shape_str()}   │   "
+            f"{self.current_image.shape_str()}   {self._image_position_text()}   │   "
             f"Focus: {f.score:.0f}   │   "
             f"Quality: {q.overall_score:.0f}/100"
         )
@@ -459,6 +580,86 @@ class MainWindow(QMainWindow):
         )
         self._status_verdict.setStyleSheet(
             f"color: {fcolor}; padding: 0 10px; font-weight: 700; font-size: 11px;"
+        )
+
+    def _image_position_text(self) -> str:
+        if self.folder_index >= 0 and self.folder_images:
+            return f"Image {self.folder_index + 1} / {len(self.folder_images)}"
+        return ""
+
+    def _refresh_focus_assist(self):
+        if self._last_focus_result is not None and self._last_quality_result is not None:
+            self._update_focus_assist(self._last_focus_result, self._last_quality_result)
+        elif self.current_image.is_loaded():
+            self._set_focus_assist_analyzing()
+        else:
+            self._focus_assist.setText(
+                "FOCUS ASSIST\n\n"
+                "Open an image to analyze focus.\n\n"
+                "After loading, this panel shows the real focus verdict, score, "
+                "warnings, and operator action."
+            )
+
+    def _set_focus_assist_analyzing(self):
+        if not hasattr(self, "_focus_assist"):
+            return
+        name = self.current_image.filename or "image"
+        self._focus_assist.setText(
+            "FOCUS ASSIST\n\n"
+            f"Analyzing {name}...\n\n"
+            "Computing focus score, quality score, and heatmap.\n"
+            "Large industrial images can take a few seconds."
+        )
+
+    def _update_focus_assist(self, focus_result, quality_result):
+        verdict = focus_result.verdict
+        score = focus_result.score
+        quality = quality_result.overall_score
+
+        if verdict in {"PERFECT", "GOOD"}:
+            action = (
+                "ACTION\n"
+                "Focus is usable for inspection. If this is a production reference, "
+                "lock lens/camera settings and compare against other captures."
+            )
+        elif verdict == "SOFT":
+            action = (
+                "ACTION\n"
+                "Image is soft. Re-tune lens focus, reduce motion/vibration, "
+                "or select ROI around the actual product area before accepting."
+            )
+        else:
+            action = (
+                "ACTION\n"
+                "Image is blurry for focus-critical inspection. Do not use as "
+                "training/reference image until lens, exposure time, lighting, "
+                "or camera stability is improved."
+            )
+
+        conflict = ""
+        if verdict in {"SOFT", "BLURRY"} and quality_result.verdict == "PASS":
+            conflict = (
+                "\n\nIMPORTANT CONFLICT\n"
+                "Quality says PASS, but focus says weak. This means exposure/noise/"
+                "contrast look acceptable, but sharpness is not good enough. "
+                "For AI/defect inspection, trust focus for edge/scratch/detail work."
+            )
+
+        heatmap_note = (
+            "\n\nHEATMAP\n"
+            "Green = locally sharper. Red/orange = weak focus or low detail. "
+            "Use the map to find whether the whole part is soft or only one region."
+        )
+
+        self._focus_assist.setText(
+            "FOCUS ASSIST\n\n"
+            f"Verdict: {verdict}\n"
+            f"Focus score: {score:.0f}\n"
+            f"Metric: {focus_result.metric}\n"
+            f"Quality score: {quality:.0f}/100 ({quality_result.verdict})\n\n"
+            f"{action}"
+            f"{conflict}"
+            f"{heatmap_note}"
         )
 
     # ═══════════════════════════════════════════════════════════════
@@ -522,12 +723,7 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        folder = os.path.dirname(path)
-        self.config.last_folder = folder
-        self.folder_images = list_images_in_folder(folder)
-        self.folder_index  = self.folder_images.index(path) if path in self.folder_images else -1
-        self.browser.set_folder(folder)
-        self.open_image(path)
+        self.open_image_with_context(path)
 
     def _menu_open_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -543,16 +739,8 @@ class MainWindow(QMainWindow):
             self.open_image(self.folder_images[0])
 
     def _open_comparison_window(self):
-        """Open comparison as a large floating window — doesn't shrink main viewer."""
-        self._dock_compare.setFloating(True)
-        self._dock_compare.setVisible(True)
-        screen = self.screen().geometry()
-        w = min(1400, int(screen.width() * 0.88))
-        h = min(900,  int(screen.height() * 0.82))
-        x = (screen.width()  - w) // 2
-        y = (screen.height() - h) // 2
-        self._dock_compare.setGeometry(x, y, w, h)
-        self._dock_compare.raise_()
+        """Open comparison as a center workspace."""
+        self._set_mode("Compare")
 
     def _toggle_all_panels(self):
         """Tab — hide all panels for full image view. Tab again — restore all."""
@@ -573,7 +761,7 @@ class MainWindow(QMainWindow):
             self._status_main.setText("")
 
     def _reset_layout(self):
-        """Restore all docks to default positions and sizes."""
+        """Restore production image-first layout."""
         # Make all docks visible first
         for dock in self._docks.values():
             dock.setVisible(True)
@@ -582,19 +770,18 @@ class MainWindow(QMainWindow):
         # Re-attach docks to their correct areas
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,   self._dock_browser)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,  self._dock_inspector)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,  self._dock_3d)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,  self._dock_focus)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_pipeline)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_fusion)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_compare)
 
         # Re-tab right docks and bottom docks
-        self.tabifyDockWidget(self._dock_inspector, self._dock_3d)
+        self.tabifyDockWidget(self._dock_inspector, self._dock_focus)
         self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
-        self.tabifyDockWidget(self._dock_pipeline, self._dock_compare)
 
         # Raise default tabs
         self._dock_inspector.raise_()
         self._dock_pipeline.raise_()
+        self._set_mode("Inspect")
 
         # Re-apply sizes after Qt processes the layout
         from PyQt6.QtCore import QTimer
@@ -602,9 +789,8 @@ class MainWindow(QMainWindow):
 
     def _add_to_comparison(self):
         if self.current_image.path:
-            self._dock_compare.setVisible(True)
-            self._dock_compare.raise_()
             self.comparison_panel.add_image_from_path(self.current_image.path)
+            self._set_mode("Compare")
 
     def _menu_save(self):
         if self.current_image.display is None:
@@ -635,9 +821,9 @@ class MainWindow(QMainWindow):
         """Set initial dock proportions after the window is fully shown."""
         h = self.height()
         w = self.width()
-        bottom_h = max(260, int(h * 0.28))
-        left_w   = max(200, int(w * 0.14))
-        right_w  = max(260, int(w * 0.18))
+        bottom_h = max(160, int(h * 0.18))   # small strip — image gets most space
+        left_w   = max(180, int(w * 0.13))
+        right_w  = max(240, int(w * 0.17))
 
         self.resizeDocks(
             [self._dock_pipeline],
