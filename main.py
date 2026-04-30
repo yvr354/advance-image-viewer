@@ -20,6 +20,8 @@ LOGO_PATH   = os.path.join(os.path.dirname(__file__), "resources", "icons", "log
 
 def main():
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+    os.environ["QT_OPENGL"] = "desktop"          # Force GPU hardware OpenGL — smooth rendering
+    os.environ["QSG_RHI_BACKEND"] = "opengl"     # Qt scene graph uses OpenGL backend
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
