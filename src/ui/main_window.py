@@ -736,6 +736,7 @@ class MainWindow(QMainWindow):
         self.inspector.update_roi_stats(self.current_image.raw, ix1, iy1, ix2, iy2)
         self._dock_inspector.raise_()
         self._dock_inspector.setVisible(True)
+        self.inspector.scroll_to(self.inspector._roi_group)
 
     def _on_line_profile_drawn(self, ix1: int, iy1: int, ix2: int, iy2: int):
         if self.current_image.raw is None:
@@ -743,6 +744,7 @@ class MainWindow(QMainWindow):
         self.inspector.update_line_profile(self.current_image.raw, ix1, iy1, ix2, iy2)
         self._dock_inspector.raise_()
         self._dock_inspector.setVisible(True)
+        self.inspector.scroll_to(self.inspector._profile_group)
 
     def _on_annotation_placed(self, ix: int, iy: int):
         labels = ["Scratch", "Pit", "Contamination", "Burr", "Crack", "OK", "Other"]
@@ -759,11 +761,13 @@ class MainWindow(QMainWindow):
         self._save_annotations()
         self._dock_inspector.raise_()
         self._dock_inspector.setVisible(True)
+        self.inspector.scroll_to(self.inspector._ann_group)
 
     def _on_measure_done(self, ix1: int, iy1: int, ix2: int, iy2: int):
         self.inspector.update_measurement(ix1, iy1, ix2, iy2, self._mm_per_px)
         self._dock_inspector.raise_()
         self._dock_inspector.setVisible(True)
+        self.inspector.scroll_to(self.inspector._measure_group)
 
     def _set_scale_calibration(self):
         from PyQt6.QtWidgets import QInputDialog
