@@ -366,6 +366,92 @@ class CompareView(QWidget):
         self._metrics_label.setWordWrap(True)
         layout.addWidget(self._metrics_label)
 
+        # ── Pixel Loupe ────────────────────────────────────────────
+        loupe_row = QHBoxLayout()
+        loupe_row.setSpacing(8)
+
+        self._loupe_chk = QCheckBox("Pixel Loupe")
+        self._loupe_chk.setChecked(True)
+        self._loupe_chk.setToolTip(
+            "Shows the pixel area under the cursor in both images at 8× zoom.\n"
+            "Hover over either viewer to see exact pixel-level detail side by side."
+        )
+        self._loupe_chk.stateChanged.connect(self._update_loupe_visibility)
+
+        self._loupe_coord = QLabel("X: —  Y: —")
+        self._loupe_coord.setStyleSheet(f"color: {ACCENT}; font-size: 10px; font-weight: 600; min-width: 90px;")
+        self._loupe_coord.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Image A loupe
+        loupe_a_col = QVBoxLayout()
+        loupe_a_col.setSpacing(2)
+        self._loupe_title_a = QLabel("A — pixel")
+        self._loupe_title_a.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
+        self._loupe_title_a.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loupe_img_a = QLabel()
+        self._loupe_img_a.setFixedSize(128, 128)
+        self._loupe_img_a.setStyleSheet("background: #0A0A0F; border: 1px solid #252535;")
+        self._loupe_img_a.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loupe_val_a = QLabel("R:—  G:—  B:—")
+        self._loupe_val_a.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 9px; font-weight: 600;")
+        self._loupe_val_a.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        loupe_a_col.addWidget(self._loupe_title_a)
+        loupe_a_col.addWidget(self._loupe_img_a)
+        loupe_a_col.addWidget(self._loupe_val_a)
+
+        # Image B loupe
+        loupe_b_col = QVBoxLayout()
+        loupe_b_col.setSpacing(2)
+        self._loupe_title_b = QLabel("B — pixel")
+        self._loupe_title_b.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
+        self._loupe_title_b.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loupe_img_b = QLabel()
+        self._loupe_img_b.setFixedSize(128, 128)
+        self._loupe_img_b.setStyleSheet("background: #0A0A0F; border: 1px solid #252535;")
+        self._loupe_img_b.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loupe_val_b = QLabel("R:—  G:—  B:—")
+        self._loupe_val_b.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 9px; font-weight: 600;")
+        self._loupe_val_b.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        loupe_b_col.addWidget(self._loupe_title_b)
+        loupe_b_col.addWidget(self._loupe_img_b)
+        loupe_b_col.addWidget(self._loupe_val_b)
+
+        # Diff column
+        loupe_diff_col = QVBoxLayout()
+        loupe_diff_col.setSpacing(2)
+        self._loupe_diff_title = QLabel("Diff A−B")
+        self._loupe_diff_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
+        self._loupe_diff_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loupe_diff_val = QLabel("—")
+        self._loupe_diff_val.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 10px; font-weight: 700;")
+        self._loupe_diff_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loupe_diff_val.setWordWrap(True)
+        self._loupe_diff_val.setFixedWidth(120)
+        loupe_diff_col.addWidget(self._loupe_diff_title)
+        loupe_diff_col.addStretch()
+        loupe_diff_col.addWidget(self._loupe_diff_val)
+        loupe_diff_col.addStretch()
+
+        self._loupe_widget = QWidget()
+        loupe_inner = QHBoxLayout(self._loupe_widget)
+        loupe_inner.setContentsMargins(4, 2, 4, 2)
+        loupe_inner.setSpacing(12)
+        loupe_inner.addLayout(loupe_a_col)
+        loupe_inner.addLayout(loupe_diff_col)
+        loupe_inner.addLayout(loupe_b_col)
+        loupe_inner.addStretch()
+        loupe_inner.addWidget(self._loupe_coord, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        loupe_header = QHBoxLayout()
+        loupe_header.addWidget(self._loupe_chk)
+        loupe_header.addStretch()
+        layout.addLayout(loupe_header)
+        layout.addWidget(self._loupe_widget)
+
+        # Connect hover from both viewers
+        self._viewer_a.pixel_hovered.connect(self._on_hover)
+        self._viewer_b.pixel_hovered.connect(self._on_hover)
+
         self.setMinimumHeight(220)
 
     # ── Sync ───────────────────────────────────────────────────────
@@ -377,6 +463,97 @@ class CompareView(QWidget):
     def _sync_b_to_a(self, zoom, ox, oy):
         if self._sync_chk.isChecked():
             self._viewer_a.set_view_state(zoom, ox, oy)
+
+    # ── Pixel Loupe ────────────────────────────────────────────────
+
+    def _update_loupe_visibility(self):
+        self._loupe_widget.setVisible(self._loupe_chk.isChecked())
+
+    def _on_hover(self, ix: int, iy: int, _pixel):
+        """Called when cursor moves over either viewer — update loupe for both images."""
+        if not self._loupe_chk.isChecked():
+            return
+        self._loupe_coord.setText(f"X: {ix}   Y: {iy}")
+        if self._image_a is not None:
+            self._render_loupe(self._image_a, ix, iy, self._loupe_img_a, self._loupe_val_a)
+        if self._image_b is not None:
+            self._render_loupe(self._image_b, ix, iy, self._loupe_img_b, self._loupe_val_b)
+        self._update_loupe_diff(ix, iy)
+
+    def _render_loupe(self, image: np.ndarray, cx: int, cy: int,
+                      label: QLabel, val_label: QLabel):
+        """Extract 16×16 patch around (cx,cy), scale to 128×128, show in label."""
+        img8 = self._to_8bit(image)
+        if img8.ndim == 2:
+            img8 = cv2.cvtColor(img8, cv2.COLOR_GRAY2RGB)
+        h, w = img8.shape[:2]
+
+        PATCH = 16
+        x1 = max(0, cx - PATCH // 2)
+        y1 = max(0, cy - PATCH // 2)
+        x2 = min(w, x1 + PATCH)
+        y2 = min(h, y1 + PATCH)
+        patch = img8[y1:y2, x1:x2]
+
+        if patch.size == 0:
+            return
+
+        # Scale to 128×128 with nearest-neighbour (raw pixels, no blur)
+        zoomed = cv2.resize(patch, (128, 128), interpolation=cv2.INTER_NEAREST)
+
+        # Draw crosshair at center
+        cx_z = int((cx - x1) / max(x2 - x1, 1) * 128)
+        cy_z = int((cy - y1) / max(y2 - y1, 1) * 128)
+        cv2.line(zoomed, (cx_z, 0),   (cx_z, 128), (0, 180, 216), 1)
+        cv2.line(zoomed, (0, cy_z),   (128, cy_z), (0, 180, 216), 1)
+
+        qimg = QImage(zoomed.data, 128, 128, 128 * 3, QImage.Format.Format_RGB888)
+        label.setPixmap(QPixmap.fromImage(qimg.copy()))
+
+        # Pixel value at cursor
+        if 0 <= cy < h and 0 <= cx < w:
+            px = image[cy, cx]
+            if hasattr(px, "__len__") and len(px) >= 3:
+                r, g, b = int(px[0]), int(px[1]), int(px[2])
+                gray = int(0.299*r + 0.587*g + 0.114*b)
+                val_label.setText(f"R:{r}  G:{g}  B:{b}  Gray:{gray}")
+            else:
+                v = int(px) if not hasattr(px, "__len__") else int(px[0])
+                val_label.setText(f"Val: {v}")
+
+    def _update_loupe_diff(self, ix: int, iy: int):
+        """Show per-pixel diff at cursor position."""
+        if self._image_a is None or self._image_b is None:
+            return
+        a8 = self._to_8bit(self._image_a)
+        b8 = self._to_8bit(self._image_b)
+        h = min(a8.shape[0], b8.shape[0])
+        w = min(a8.shape[1], b8.shape[1])
+        if not (0 <= iy < h and 0 <= ix < w):
+            return
+        pa = a8[iy, ix]
+        pb = b8[iy, ix]
+        if a8.ndim == 3 and len(pa) >= 3:
+            dr = int(pa[0]) - int(pb[0])
+            dg = int(pa[1]) - int(pb[1])
+            db = int(pa[2]) - int(pb[2])
+            total = abs(dr) + abs(dg) + abs(db)
+            color = "#00E676" if total == 0 else ("#FFAB40" if total < 20 else "#FF5252")
+            self._loupe_diff_val.setText(
+                f"ΔR: {dr:+d}\nΔG: {dg:+d}\nΔB: {db:+d}\nTotal: {total}"
+            )
+            self._loupe_diff_val.setStyleSheet(
+                f"color: {color}; font-size: 10px; font-weight: 700;"
+            )
+        else:
+            va = int(pa) if not hasattr(pa, "__len__") else int(pa[0])
+            vb = int(pb) if not hasattr(pb, "__len__") else int(pb[0])
+            diff = va - vb
+            color = "#00E676" if diff == 0 else "#FF5252"
+            self._loupe_diff_val.setText(f"Δ: {diff:+d}")
+            self._loupe_diff_val.setStyleSheet(
+                f"color: {color}; font-size: 12px; font-weight: 700;"
+            )
 
     # ── Public API ─────────────────────────────────────────────────
 
