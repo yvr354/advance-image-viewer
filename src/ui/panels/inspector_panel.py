@@ -1,11 +1,13 @@
-"""Right-side inspector panel — focus metrics, quality scores, histogram, pixel values."""
+"""Right-side inspector panel — focus, quality, histogram, pixel, ROI, profile, annotations, measurement."""
 
+import math
 import numpy as np
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QGroupBox, QGridLayout,
-    QProgressBar, QSizePolicy, QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox, QGridLayout,
+    QProgressBar, QSizePolicy, QScrollArea, QTableWidget, QTableWidgetItem,
+    QHeaderView, QPushButton, QFrame,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 import pyqtgraph as pg
 
@@ -34,11 +36,14 @@ class MetricRow(QWidget):
 
 
 class InspectorPanel(QScrollArea):
+
+    annotation_remove_requested = pyqtSignal(int)   # annotation index
+
     def __init__(self):
         super().__init__()
         self.setWidgetResizable(True)
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(280)
+        self.setMinimumWidth(240)
+        self.setMaximumWidth(310)
 
         container = QWidget()
         self._layout = QVBoxLayout(container)
@@ -50,12 +55,14 @@ class InspectorPanel(QScrollArea):
         self._build_quality_group()
         self._build_histogram_group()
         self._build_pixel_group()
+        self._build_roi_group()
+        self._build_profile_group()
+        self._build_annotation_group()
+        self._build_measure_group()
 
         self._layout.addStretch()
 
-    # ------------------------------------------------------------------ #
-    #  Focus group
-    # ------------------------------------------------------------------ #
+    # ── Focus ──────────────────────────────────────────────────────────────
 
     def _build_focus_group(self):
         box = QGroupBox("Focus & Sharpness")
@@ -85,9 +92,7 @@ class InspectorPanel(QScrollArea):
         self._focus_score_row.set_value(f"{result.score:.0f}", pct, color)
         self._focus_metric_label.setText(f"Metric: {result.metric}")
 
-    # ------------------------------------------------------------------ #
-    #  Quality group
-    # ------------------------------------------------------------------ #
+    # ── Quality ────────────────────────────────────────────────────────────
 
     def _build_quality_group(self):
         box = QGroupBox("Image Quality")
@@ -129,9 +134,7 @@ class InspectorPanel(QScrollArea):
         snr_pct = min(max((result.snr_db - 0) / 60 * 100, 0), 100)
         self._snr_row.set_value(f"{result.snr_db:.1f} dB", snr_pct)
 
-    # ------------------------------------------------------------------ #
-    #  Histogram
-    # ------------------------------------------------------------------ #
+    # ── Histogram ──────────────────────────────────────────────────────────
 
     def _build_histogram_group(self):
         self._hist_group = QGroupBox("Histogram")
@@ -151,7 +154,8 @@ class InspectorPanel(QScrollArea):
     def update_histogram(self, hist_data: dict):
         self._hist_widget.clear()
         x = np.arange(256)
-        colors = {"red": (255, 50, 50), "green": (50, 200, 50), "blue": (50, 100, 255), "gray": (180, 180, 180), "luma": (200, 200, 200)}
+        colors = {"red": (255, 50, 50), "green": (50, 200, 50), "blue": (50, 100, 255),
+                  "gray": (180, 180, 180), "luma": (200, 200, 200)}
         for ch, data in hist_data.items():
             color = colors.get(ch, (180, 180, 180))
             pen = pg.mkPen(color=color, width=1)
@@ -161,9 +165,7 @@ class InspectorPanel(QScrollArea):
         self._hist_visible = not self._hist_visible
         self._hist_group.setVisible(self._hist_visible)
 
-    # ------------------------------------------------------------------ #
-    #  Pixel inspector
-    # ------------------------------------------------------------------ #
+    # ── Pixel inspector ────────────────────────────────────────────────────
 
     def _build_pixel_group(self):
         box = QGroupBox("Pixel Inspector")
@@ -216,3 +218,314 @@ class InspectorPanel(QScrollArea):
     @classmethod
     def _display_rgb(cls, r: int, g: int, b: int) -> tuple[int, int, int]:
         return cls._display_channel(r), cls._display_channel(g), cls._display_channel(b)
+
+    # ── ROI Analysis ───────────────────────────────────────────────────────
+
+    def _build_roi_group(self):
+        self._roi_group = QGroupBox("ROI Analysis")
+        layout = QVBoxLayout(self._roi_group)
+        layout.setSpacing(3)
+
+        self._roi_size_lbl = QLabel("Draw a rectangle on the image")
+        self._roi_size_lbl.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
+        layout.addWidget(self._roi_size_lbl)
+
+        # Stats table: header + R/G/B/Gray rows
+        tbl = QWidget()
+        g = QGridLayout(tbl)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setSpacing(2)
+        for col, hdr in enumerate(["", "Mean", "Std", "Min", "Max"]):
+            lbl = QLabel(hdr)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color:#00B4D8; font-size:9px; font-weight:bold;")
+            g.addWidget(lbl, 0, col)
+
+        self._roi_cells: dict[str, list[QLabel]] = {}
+        for row, (ch, color) in enumerate([("R", "#FF5252"), ("G", "#00E676"),
+                                            ("B", "#448AFF"), ("Gray", "#CCCCDD")], 1):
+            name_lbl = QLabel(ch)
+            name_lbl.setStyleSheet(f"color:{color}; font-size:9px; font-weight:bold;")
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            g.addWidget(name_lbl, row, 0)
+            cells = []
+            for col in range(1, 5):
+                lbl = QLabel("—")
+                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                lbl.setStyleSheet("font-size:9px;")
+                g.addWidget(lbl, row, col)
+                cells.append(lbl)
+            self._roi_cells[ch] = cells
+
+        layout.addWidget(tbl)
+        self._roi_group.setVisible(False)
+        self._layout.addWidget(self._roi_group)
+
+    def update_roi_stats(self, image: np.ndarray, ix1: int, iy1: int,
+                          ix2: int, iy2: int):
+        region = image[iy1:iy2, ix1:ix2]
+        if region.size == 0:
+            return
+
+        w_px = ix2 - ix1;  h_px = iy2 - iy1
+        self._roi_size_lbl.setText(f"Region: {w_px}×{h_px} px  ({w_px*h_px:,} px²)")
+        self._roi_size_lbl.setStyleSheet("color:#CCCCDD; font-size:10px;")
+
+        def _stats(arr):
+            a = arr.astype(np.float32)
+            return f"{a.mean():.1f}", f"{a.std():.1f}", f"{a.min():.0f}", f"{a.max():.0f}"
+
+        if region.ndim == 3 and region.shape[2] >= 3:
+            for ch, idx in [("R", 0), ("G", 1), ("B", 2)]:
+                vals = _stats(region[:, :, idx])
+                for lbl, v in zip(self._roi_cells[ch], vals):
+                    lbl.setText(v)
+            gray = (0.299 * region[:, :, 0] + 0.587 * region[:, :, 1] +
+                    0.114 * region[:, :, 2])
+            for lbl, v in zip(self._roi_cells["Gray"], _stats(gray)):
+                lbl.setText(v)
+        else:
+            arr = region if region.ndim == 2 else region[:, :, 0]
+            vals = _stats(arr)
+            for ch in ["R", "G", "B", "Gray"]:
+                for lbl, v in zip(self._roi_cells[ch], vals):
+                    lbl.setText(v)
+
+        self._roi_group.setVisible(True)
+
+    # ── Line Profile ───────────────────────────────────────────────────────
+
+    def _build_profile_group(self):
+        self._profile_group = QGroupBox("Intensity Line Profile")
+        layout = QVBoxLayout(self._profile_group)
+        layout.setSpacing(3)
+
+        self._profile_length_lbl = QLabel("Draw a line on the image")
+        self._profile_length_lbl.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
+        layout.addWidget(self._profile_length_lbl)
+
+        self._profile_plot = pg.PlotWidget()
+        self._profile_plot.setBackground("#0D0D1A")
+        self._profile_plot.setFixedHeight(110)
+        self._profile_plot.getAxis("left").setStyle(tickFont=QFont("Consolas", 7))
+        self._profile_plot.getAxis("bottom").setStyle(tickFont=QFont("Consolas", 7))
+        self._profile_plot.showGrid(x=True, y=True, alpha=0.15)
+        self._profile_plot.setMouseEnabled(False, False)
+        self._profile_plot.setLabel("bottom", "px along line", color="#888899", size="8pt")
+        self._profile_plot.setLabel("left", "intensity", color="#888899", size="8pt")
+        layout.addWidget(self._profile_plot)
+
+        self._profile_stats_lbl = QLabel("")
+        self._profile_stats_lbl.setStyleSheet("color:#888899; font-size:9px;")
+        layout.addWidget(self._profile_stats_lbl)
+
+        self._profile_group.setVisible(False)
+        self._layout.addWidget(self._profile_group)
+
+    def update_line_profile(self, image: np.ndarray, ix1: int, iy1: int,
+                             ix2: int, iy2: int):
+        length = int(math.sqrt((ix2 - ix1)**2 + (iy2 - iy1)**2))
+        n = max(2, min(512, length))
+        xs = np.linspace(ix1, ix2, n).astype(int)
+        ys = np.linspace(iy1, iy2, n).astype(int)
+        H, W = image.shape[:2]
+        xs = np.clip(xs, 0, W - 1)
+        ys = np.clip(ys, 0, H - 1)
+
+        self._profile_length_lbl.setText(
+            f"Length: {length} px  |  ({ix1},{iy1}) → ({ix2},{iy2})")
+        self._profile_length_lbl.setStyleSheet("color:#CCCCDD; font-size:10px;")
+
+        self._profile_plot.clear()
+        px_axis = np.arange(n)
+
+        if image.ndim == 3 and image.shape[2] >= 3:
+            for ch_idx, (color, name) in enumerate(
+                    [(( 255,  80,  80), "R"), ((80, 220, 80), "G"), ((80, 120, 255), "B")]):
+                vals = image[ys, xs, ch_idx].astype(np.float32)
+                pen = pg.mkPen(color=color, width=1.2)
+                self._profile_plot.plot(px_axis, vals, pen=pen, name=name)
+            gray = (0.299 * image[ys, xs, 0] + 0.587 * image[ys, xs, 1] +
+                    0.114 * image[ys, xs, 2])
+            stats_ch = gray
+        else:
+            arr = image[ys, xs] if image.ndim == 2 else image[ys, xs, 0]
+            vals = arr.astype(np.float32)
+            pen = pg.mkPen(color=(200, 200, 200), width=1.5)
+            self._profile_plot.plot(px_axis, vals, pen=pen)
+            stats_ch = vals
+
+        mn = stats_ch.min();  mx = stats_ch.max();  avg = stats_ch.mean()
+        self._profile_stats_lbl.setText(
+            f"Min: {mn:.0f}  Max: {mx:.0f}  Mean: {avg:.1f}  ΔRange: {mx-mn:.0f}")
+
+        self._profile_group.setVisible(True)
+
+    # ── Annotations ────────────────────────────────────────────────────────
+
+    _ANN_COLORS = {
+        "Scratch": "#FF1744", "Pit": "#FF6D00", "Contamination": "#FFD600",
+        "Burr": "#E040FB", "Crack": "#FF5252", "OK": "#00E676", "Other": "#00B0FF",
+    }
+
+    def _build_annotation_group(self):
+        self._ann_group = QGroupBox("Annotations")
+        layout = QVBoxLayout(self._ann_group)
+        layout.setSpacing(4)
+
+        self._ann_hint = QLabel("Click image to place markers")
+        self._ann_hint.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
+        layout.addWidget(self._ann_hint)
+
+        self._ann_table = QTableWidget(0, 4)
+        self._ann_table.setHorizontalHeaderLabels(["#", "Label", "X", "Y"])
+        self._ann_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch)
+        self._ann_table.horizontalHeader().setDefaultSectionSize(44)
+        self._ann_table.setColumnWidth(0, 28)
+        self._ann_table.verticalHeader().setVisible(False)
+        self._ann_table.setFixedHeight(110)
+        self._ann_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._ann_table.setStyleSheet(
+            "QTableWidget { font-size:9px; background:#0D0D1A; "
+            "gridline-color:#1A1A2A; border:1px solid #1A1A2A; }"
+            "QHeaderView::section { background:#141428; color:#00B4D8; "
+            "border:none; padding:2px; font-size:9px; }"
+        )
+        layout.addWidget(self._ann_table)
+
+        btn_row = QHBoxLayout()
+        self._ann_clear_btn = QPushButton("Clear All")
+        self._ann_clear_btn.setFixedHeight(22)
+        self._ann_clear_btn.setStyleSheet(
+            "QPushButton { background:#1A1A2A; color:#FF5252; font-size:9px; "
+            "border:1px solid #2A2A3A; padding:2px 8px; }"
+            "QPushButton:hover { background:#2A1A1A; }"
+        )
+        self._ann_count_lbl = QLabel("0 annotations")
+        self._ann_count_lbl.setStyleSheet("color:#555566; font-size:9px;")
+        btn_row.addWidget(self._ann_count_lbl)
+        btn_row.addStretch()
+        btn_row.addWidget(self._ann_clear_btn)
+        layout.addLayout(btn_row)
+
+        self._ann_group.setVisible(False)
+        self._layout.addWidget(self._ann_group)
+
+    def show_annotation_tools(self, visible: bool):
+        if visible:
+            self._ann_group.setVisible(True)
+
+    def refresh_annotations(self, annotations: list):
+        """Re-populate annotation table from viewer's annotation list."""
+        self._ann_table.setRowCount(0)
+        for i, ann in enumerate(annotations):
+            row = self._ann_table.rowCount()
+            self._ann_table.insertRow(row)
+            label = ann.get("label", "Other")
+            color = QColor(self._ANN_COLORS.get(label, "#00B0FF"))
+
+            items = [
+                QTableWidgetItem(str(i + 1)),
+                QTableWidgetItem(label),
+                QTableWidgetItem(str(ann["ix"])),
+                QTableWidgetItem(str(ann["iy"])),
+            ]
+            for col, item in enumerate(items):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if col == 1:
+                    item.setForeground(color)
+                self._ann_table.setItem(row, col, item)
+
+        n = len(annotations)
+        self._ann_count_lbl.setText(f"{n} annotation{'s' if n != 1 else ''}")
+        hint_vis = n == 0
+        self._ann_hint.setVisible(hint_vis)
+        self._ann_table.setVisible(not hint_vis or True)
+        self._ann_group.setVisible(True)
+
+    # ── Measurement ────────────────────────────────────────────────────────
+
+    def _build_measure_group(self):
+        self._measure_group = QGroupBox("Measurement")
+        layout = QVBoxLayout(self._measure_group)
+        layout.setSpacing(4)
+
+        self._meas_hint = QLabel("Drag on the image to measure distance")
+        self._meas_hint.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
+        layout.addWidget(self._meas_hint)
+
+        grid = QGridLayout()
+        grid.setSpacing(3)
+
+        def _row_lbl(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color:#888899; font-size:10px;")
+            return lbl
+
+        def _val_lbl():
+            lbl = QLabel("—")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            lbl.setStyleSheet("color:#CCCCDD; font-size:10px; font-weight:bold;")
+            return lbl
+
+        self._meas_dist_px  = _val_lbl()
+        self._meas_dist_mm  = _val_lbl()
+        self._meas_dx       = _val_lbl()
+        self._meas_dy       = _val_lbl()
+        self._meas_angle    = _val_lbl()
+
+        grid.addWidget(_row_lbl("Distance"),  0, 0)
+        grid.addWidget(self._meas_dist_px,    0, 1)
+        grid.addWidget(_row_lbl("(mm)"),      1, 0)
+        grid.addWidget(self._meas_dist_mm,    1, 1)
+        grid.addWidget(_row_lbl("ΔX"),        2, 0)
+        grid.addWidget(self._meas_dx,         2, 1)
+        grid.addWidget(_row_lbl("ΔY"),        3, 0)
+        grid.addWidget(self._meas_dy,         3, 1)
+        grid.addWidget(_row_lbl("Angle"),     4, 0)
+        grid.addWidget(self._meas_angle,      4, 1)
+        layout.addLayout(grid)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#1A1A2A;")
+        layout.addWidget(sep)
+
+        self._calib_lbl = QLabel("Scale: not calibrated")
+        self._calib_lbl.setStyleSheet("color:#555566; font-size:9px;")
+        layout.addWidget(self._calib_lbl)
+
+        self._measure_group.setVisible(False)
+        self._layout.addWidget(self._measure_group)
+
+    def update_measurement(self, ix1: int, iy1: int, ix2: int, iy2: int,
+                            mm_per_px: float = 0.0):
+        dx = ix2 - ix1;  dy = iy2 - iy1
+        dist_px = math.sqrt(dx * dx + dy * dy)
+        angle   = math.degrees(math.atan2(abs(dy), abs(dx)))
+
+        self._meas_dist_px.setText(f"{dist_px:.2f} px")
+        self._meas_dx.setText(f"{abs(dx)} px")
+        self._meas_dy.setText(f"{abs(dy)} px")
+        self._meas_angle.setText(f"{angle:.2f}°")
+
+        if mm_per_px > 0:
+            self._meas_dist_mm.setText(f"{dist_px * mm_per_px:.4f} mm")
+            self._calib_lbl.setText(f"Scale: {mm_per_px:.6f} mm/px")
+            self._calib_lbl.setStyleSheet("color:#00B4D8; font-size:9px;")
+        else:
+            self._meas_dist_mm.setText("— (not calibrated)")
+            self._calib_lbl.setText("Scale: not calibrated")
+            self._calib_lbl.setStyleSheet("color:#555566; font-size:9px;")
+
+        self._meas_hint.setVisible(False)
+        self._measure_group.setVisible(True)
+
+    def set_calibration_label(self, mm_per_px: float):
+        if mm_per_px > 0:
+            self._calib_lbl.setText(f"Scale: {mm_per_px:.6f} mm/px")
+            self._calib_lbl.setStyleSheet("color:#00B4D8; font-size:9px;")
+        else:
+            self._calib_lbl.setText("Scale: not calibrated")
+            self._calib_lbl.setStyleSheet("color:#555566; font-size:9px;")

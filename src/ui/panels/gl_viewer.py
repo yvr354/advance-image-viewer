@@ -3,18 +3,28 @@ OpenGL image viewer.
 Renders image as GPU texture — 10K×10K images pan/zoom at 60fps.
 
 Controls:
-  Left drag        — pan
-  Scroll wheel     — zoom toward cursor
-  Right drag       — rubber-band rectangle → zoom to that region
-  Double-click     — fit to window
-  F                — toggle focus heatmap
+  Left drag (Navigate)  — pan
+  Scroll wheel          — zoom toward cursor
+  Right drag (Navigate) — rubber-band zoom to region
+  Double-click          — fit to window
+  F                     — toggle focus heatmap
+  G                     — toggle focus grid
+
+Inspection tool modes (set via set_tool()):
+  navigate  — default: pan + rubber-band zoom
+  roi       — left drag draws ROI rectangle; right drag pans
+  profile   — left drag draws intensity-profile line; right drag pans
+  annotate  — left click places annotation marker; right drag pans
+  measure   — left drag draws calibrated distance line; right drag pans
 """
 
+import math
 import numpy as np
 import cv2
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
-from PyQt6.QtGui import QWheelEvent, QMouseEvent, QSurfaceFormat, QFont, QPainter, QColor
+from PyQt6.QtGui import (QWheelEvent, QMouseEvent, QSurfaceFormat, QFont,
+                          QPainter, QColor, QPen, QBrush)
 
 from OpenGL.GL import (
     glEnable, glDisable, glBlendFunc, glClearColor, glClear, glViewport,
@@ -30,6 +40,17 @@ from OpenGL.GL import (
     glGenBuffers,
 )
 
+# ── Per-label annotation colors ────────────────────────────────────────────
+_ANN_COLORS = {
+    "Scratch":       "#FF1744",
+    "Pit":           "#FF6D00",
+    "Contamination": "#FFD600",
+    "Burr":          "#E040FB",
+    "Crack":         "#FF5252",
+    "OK":            "#00E676",
+    "Other":         "#00B0FF",
+}
+
 
 class GLImageViewer(QOpenGLWidget):
     """
@@ -37,9 +58,16 @@ class GLImageViewer(QOpenGLWidget):
     Handles images of any size — rendering cost is screen-size, not image-size.
     """
 
-    pixel_hovered      = pyqtSignal(int, int, object)   # x, y, pixel value
+    # ── Navigation / analysis signals ────────────────────────────────────
+    pixel_hovered      = pyqtSignal(int, int, object)    # x, y, pixel value
     zoom_changed       = pyqtSignal(float)
-    view_state_changed = pyqtSignal(float, float, float) # zoom, offset_x, offset_y
+    view_state_changed = pyqtSignal(float, float, float)  # zoom, offset_x, offset_y
+
+    # ── Inspection tool signals (image-pixel coordinates) ─────────────────
+    roi_selected       = pyqtSignal(int, int, int, int)   # ix1,iy1,ix2,iy2
+    line_profile_drawn = pyqtSignal(int, int, int, int)   # ix1,iy1,ix2,iy2
+    annotation_placed  = pyqtSignal(int, int)             # ix, iy
+    measure_done       = pyqtSignal(int, int, int, int)   # ix1,iy1,ix2,iy2
 
     def __init__(self, parent=None):
         fmt = QSurfaceFormat()
@@ -60,7 +88,7 @@ class GLImageViewer(QOpenGLWidget):
         self._drag_start:  QPointF | None = None
         self._drag_offset: QPointF | None = None
 
-        # Rubber-band zoom
+        # Rubber-band zoom (navigate mode only)
         self._rb_start:   QPointF | None = None
         self._rb_current: QPointF | None = None
 
@@ -74,9 +102,25 @@ class GLImageViewer(QOpenGLWidget):
         self._focus_grid       = None   # FocusGridData or None
         self._show_focus_grid: bool = False
 
+        # ── Inspection tool system ────────────────────────────────────────
+        self._tool: str = "navigate"         # navigate|roi|profile|annotate|measure
+        self._tdrag_start: QPointF | None = None   # screen pos at tool press
+        self._tdrag_now:   QPointF | None = None   # screen pos at current move
+
+        # Finalized overlays (image pixel coords)
+        self._roi_img:     tuple | None = None   # (ix1,iy1,ix2,iy2)
+        self._profile_img: tuple | None = None   # (ix1,iy1,ix2,iy2)
+        self._measure_img: tuple | None = None   # (ix1,iy1,ix2,iy2)
+
+        # Annotations: list of {ix, iy, label}
+        self._annotations: list = []
+
+        # mm/px calibration for measurement tool
+        self._mm_per_px: float = 0.0   # 0 = not calibrated
+
         # Throttle pixel hover — only emit when image coordinate changes
-        self._last_hover_ix:   int   = -1
-        self._last_hover_iy:   int   = -1
+        self._last_hover_ix: int = -1
+        self._last_hover_iy: int = -1
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -107,7 +151,6 @@ class GLImageViewer(QOpenGLWidget):
 
     def toggle_heatmap(self):
         self._show_heatmap = not self._show_heatmap
-        # Grid and heatmap are mutually exclusive — both at once = unreadable
         if self._show_heatmap:
             self._show_focus_grid = False
         self.update()
@@ -117,12 +160,59 @@ class GLImageViewer(QOpenGLWidget):
         self.update()
 
     def set_focus_grid(self, grid_data):
-        """Set rich focus grid data. Pass None to clear."""
         self._focus_grid = grid_data
         self.update()
 
     def set_focus_grid_visible(self, visible: bool):
         self._show_focus_grid = visible
+        self.update()
+
+    # ── Inspection tool API ───────────────────────────────────────────────
+
+    def set_tool(self, tool: str):
+        """Switch inspection tool. 'navigate' restores normal pan/zoom behavior."""
+        self._tool = tool
+        self._tdrag_start = None
+        self._tdrag_now   = None
+        if tool == "navigate":
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif tool == "annotate":
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        self.update()
+
+    def set_calibration(self, mm_per_px: float):
+        self._mm_per_px = mm_per_px
+        self.update()
+
+    def clear_tool_overlays(self):
+        """Remove ROI, profile line, and measure line."""
+        self._roi_img     = None
+        self._profile_img = None
+        self._measure_img = None
+        self._tdrag_start = None
+        self._tdrag_now   = None
+        self.update()
+
+    def add_annotation(self, ix: int, iy: int, label: str):
+        self._annotations.append({"ix": ix, "iy": iy, "label": label})
+        self.update()
+
+    def remove_annotation(self, index: int):
+        if 0 <= index < len(self._annotations):
+            self._annotations.pop(index)
+            self.update()
+
+    def clear_annotations(self):
+        self._annotations.clear()
+        self.update()
+
+    def get_annotations(self) -> list:
+        return list(self._annotations)
+
+    def set_annotations(self, anns: list):
+        self._annotations = list(anns)
         self.update()
 
     def fit_to_window(self):
@@ -155,6 +245,10 @@ class GLImageViewer(QOpenGLWidget):
         iy = (screen_y - self._offset.y()) / self._zoom
         return int(ix), int(iy)
 
+    def _img_to_screen(self, ix: float, iy: float):
+        return (self._offset.x() + ix * self._zoom,
+                self._offset.y() + iy * self._zoom)
+
     # ── OpenGL lifecycle ──────────────────────────────────────────────────
 
     def initializeGL(self):
@@ -171,7 +265,6 @@ class GLImageViewer(QOpenGLWidget):
         glMatrixMode(GL_MODELVIEW)
 
     def paintGL(self):
-        # Lazy upload: if image is pending but GL wasn't ready at set_image() time
         if self._image is not None and self._tex_image == 0:
             self._upload_image_texture(self._image)
             self._center()
@@ -195,6 +288,26 @@ class GLImageViewer(QOpenGLWidget):
 
         if self._rb_start and self._rb_current:
             self._draw_rubber_band()
+
+    def paintEvent(self, event):
+        """GL renders first; QPainter draws all vector overlays on top."""
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+        if self._img_w > 0:
+            if self._show_focus_grid and self._focus_grid is not None:
+                self._paint_focus_grid_labels(painter)
+            self._paint_roi_overlay(painter)
+            self._paint_profile_overlay(painter)
+            self._paint_measure_overlay(painter)
+            self._paint_annotations(painter)
+
+        painter.end()
+
+    # ── GL draw helpers ───────────────────────────────────────────────────
 
     def _draw_texture(self, tex: int, opacity: float):
         x = self._offset.x()
@@ -235,19 +348,16 @@ class GLImageViewer(QOpenGLWidget):
         glEnable(GL_TEXTURE_2D)
 
     def _draw_rubber_band(self):
-        """Draw rubber-band selection rectangle (right-drag to zoom)."""
         glDisable(GL_TEXTURE_2D)
         x1, y1 = self._rb_start.x(),   self._rb_start.y()
         x2, y2 = self._rb_current.x(), self._rb_current.y()
 
-        # Translucent fill
         glColor4f(0.0, 0.706, 0.847, 0.12)
         glBegin(GL_QUADS)
         glVertex2f(x1, y1); glVertex2f(x2, y1)
         glVertex2f(x2, y2); glVertex2f(x1, y2)
         glEnd()
 
-        # Solid accent border
         glColor4f(0.0, 0.706, 0.847, 1.0)
         glLineWidth(1.5)
         glBegin(GL_LINE_LOOP)
@@ -255,15 +365,9 @@ class GLImageViewer(QOpenGLWidget):
         glVertex2f(x2, y2); glVertex2f(x1, y2)
         glEnd()
         glLineWidth(1.0)
-
         glEnable(GL_TEXTURE_2D)
 
     def _draw_focus_grid_gl(self):
-        """
-        Focus grid — clear industrial design.
-        Each cell: vivid colored fill (semi-transparent) + solid bright border.
-        Image stays readable through the fill. Text drawn in paintEvent.
-        """
         g = self._focus_grid
         R, C    = g.rows, g.cols
         ox, oy  = self._offset.x(), self._offset.y()
@@ -284,19 +388,17 @@ class GLImageViewer(QOpenGLWidget):
                 sx1 = ox + (c + 1) * cell_sw
                 sy1 = oy + (r + 1) * cell_sh
 
-                # Vivid colors — saturated so clearly visible
                 if is_best:
-                    fr, fg_, fb = 0.0,  1.0,  0.35    # pure green
+                    fr, fg_, fb = 0.0,  1.0,  0.35
                 elif is_worst:
-                    fr, fg_, fb = 1.0,  0.08, 0.08    # pure red
+                    fr, fg_, fb = 1.0,  0.08, 0.08
                 elif score >= 72:
-                    fr, fg_, fb = 0.0,  0.90, 0.30    # green
+                    fr, fg_, fb = 0.0,  0.90, 0.30
                 elif score >= 38:
-                    fr, fg_, fb = 1.0,  0.72, 0.0     # amber/orange
+                    fr, fg_, fb = 1.0,  0.72, 0.0
                 else:
-                    fr, fg_, fb = 0.95, 0.10, 0.10    # red
+                    fr, fg_, fb = 0.95, 0.10, 0.10
 
-                # Fill: BEST/WORST get stronger fill, others lighter
                 fill_alpha = 0.45 if (is_best or is_worst) else 0.28
                 glColor4f(fr, fg_, fb, fill_alpha)
                 glBegin(GL_QUADS)
@@ -304,7 +406,6 @@ class GLImageViewer(QOpenGLWidget):
                 glVertex2f(sx1, sy1); glVertex2f(sx0, sy1)
                 glEnd()
 
-                # Border: bright solid line
                 lw = 3.0 if (is_best or is_worst) else 1.5
                 glLineWidth(lw)
                 glColor4f(fr, fg_, fb, 1.0)
@@ -316,14 +417,17 @@ class GLImageViewer(QOpenGLWidget):
         glLineWidth(1.0)
         glEnable(GL_TEXTURE_2D)
 
-    def paintEvent(self, event):
-        """GL render, then QPainter draws score numbers with dark outline — always readable."""
-        super().paintEvent(event)
+    def _draw_empty_hint(self):
+        painter = QPainter(self)
+        painter.setPen(QColor(68, 68, 90))
+        painter.setFont(QFont("Segoe UI", 13))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                         "Open Image   Ctrl+O\nor drag & drop here")
+        painter.end()
 
-        if not (self._show_focus_grid and self._focus_grid is not None
-                and self._img_w > 0):
-            return
+    # ── QPainter overlay layers ───────────────────────────────────────────
 
+    def _paint_focus_grid_labels(self, painter: QPainter):
         g = self._focus_grid
         R, C    = g.rows, g.cols
         ox, oy  = self._offset.x(), self._offset.y()
@@ -332,17 +436,12 @@ class GLImageViewer(QOpenGLWidget):
         cell_sh = g.img_h * zoom / R
 
         if cell_sw < 30 or cell_sh < 20:
-            return   # cells too small — skip text
+            return
 
         from PyQt6.QtCore import QRectF, Qt as _Qt
 
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-
-        # Font: large enough to fill the cell
-        font_size = max(9, min(22, int(cell_sh * 0.38)))
-        font_bold = QFont("Segoe UI", font_size, QFont.Weight.Bold)
+        font_size  = max(9, min(22, int(cell_sh * 0.38)))
+        font_bold  = QFont("Segoe UI", font_size, QFont.Weight.Bold)
         font_small = QFont("Segoe UI", max(7, font_size - 3), QFont.Weight.Bold)
 
         for r in range(R):
@@ -350,12 +449,10 @@ class GLImageViewer(QOpenGLWidget):
                 score    = float(g.scores[r, c])
                 is_best  = (r, c) == g.best_cell
                 is_worst = (r, c) == g.worst_cell
-
                 sx0 = ox + c * cell_sw
                 sy0 = oy + r * cell_sh
                 cell_rect = QRectF(sx0, sy0, cell_sw, cell_sh)
 
-                # Text color
                 if is_best:
                     txt_color = QColor(220, 255, 220)
                 elif is_worst:
@@ -367,45 +464,172 @@ class GLImageViewer(QOpenGLWidget):
                 else:
                     txt_color = QColor(255, 200, 200)
 
-                # Draw score with dark outline so it reads on any background
                 score_str = f"{score:.0f}"
                 painter.setFont(font_bold)
 
-                # Dark outline (draw text 4 times offset)
                 painter.setPen(QColor(0, 0, 0, 200))
-                for dx, dy in [(-1,-1),(1,-1),(-1,1),(1,1)]:
+                for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
                     shifted = QRectF(sx0+dx, sy0+dy+cell_sh*0.15, cell_sw, cell_sh*0.55)
                     painter.drawText(shifted, _Qt.AlignmentFlag.AlignCenter, score_str)
 
-                # Main colored text
                 painter.setPen(txt_color)
-                score_rect = QRectF(sx0, sy0 + cell_sh * 0.15, cell_sw, cell_sh * 0.55)
-                painter.drawText(score_rect, _Qt.AlignmentFlag.AlignCenter, score_str)
+                painter.drawText(QRectF(sx0, sy0+cell_sh*0.15, cell_sw, cell_sh*0.55),
+                                 _Qt.AlignmentFlag.AlignCenter, score_str)
 
-                # BEST / WORST label below the number
                 if is_best or is_worst:
                     painter.setFont(font_small)
                     label = "◆ BEST" if is_best else "◆ WORST"
                     lcolor = QColor(180, 255, 180) if is_best else QColor(255, 180, 180)
 
                     painter.setPen(QColor(0, 0, 0, 180))
-                    for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                         lr = QRectF(sx0+dx, sy0+dy+cell_sh*0.62, cell_sw, cell_sh*0.32)
                         painter.drawText(lr, _Qt.AlignmentFlag.AlignCenter, label)
 
                     painter.setPen(lcolor)
-                    label_rect = QRectF(sx0, sy0 + cell_sh * 0.62, cell_sw, cell_sh * 0.32)
-                    painter.drawText(label_rect, _Qt.AlignmentFlag.AlignCenter, label)
+                    painter.drawText(QRectF(sx0, sy0+cell_sh*0.62, cell_sw, cell_sh*0.32),
+                                     _Qt.AlignmentFlag.AlignCenter, label)
 
-        painter.end()
+    def _paint_roi_overlay(self, painter: QPainter):
+        from PyQt6.QtCore import QRectF
 
-    def _draw_empty_hint(self):
-        painter = QPainter(self)
-        painter.setPen(QColor(68, 68, 90))
-        painter.setFont(QFont("Segoe UI", 13))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                         "Open Image   Ctrl+O\nor drag & drop here")
-        painter.end()
+        # Live drag preview
+        if self._tdrag_start is not None and self._tdrag_now is not None \
+                and self._tool == "roi":
+            x1 = min(self._tdrag_start.x(), self._tdrag_now.x())
+            y1 = min(self._tdrag_start.y(), self._tdrag_now.y())
+            x2 = max(self._tdrag_start.x(), self._tdrag_now.x())
+            y2 = max(self._tdrag_start.y(), self._tdrag_now.y())
+            painter.setPen(QPen(QColor("#00E5FF"), 1.5, Qt.PenStyle.DashLine))
+            painter.setBrush(QBrush(QColor(0, 229, 255, 25)))
+            painter.drawRect(QRectF(x1, y1, x2 - x1, y2 - y1))
+
+        # Finalized ROI
+        if self._roi_img is None:
+            return
+        ix1, iy1, ix2, iy2 = self._roi_img
+        sx1, sy1 = self._img_to_screen(ix1, iy1)
+        sx2, sy2 = self._img_to_screen(ix2, iy2)
+
+        painter.setPen(QPen(QColor("#00E5FF"), 2.0))
+        painter.setBrush(QBrush(QColor(0, 229, 255, 18)))
+        painter.drawRect(QRectF(sx1, sy1, sx2 - sx1, sy2 - sy1))
+
+        # Corner handles
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#00E5FF")))
+        for cx, cy in [(sx1, sy1), (sx2, sy1), (sx1, sy2), (sx2, sy2)]:
+            painter.drawEllipse(QPointF(cx, cy), 4, 4)
+
+        # Size label
+        w_px = ix2 - ix1;  h_px = iy2 - iy1
+        lbl = f" {w_px}×{h_px} px "
+        painter.setPen(QColor(0, 0, 0, 160))
+        painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        painter.drawText(QPointF(sx1 + 2, sy1 - 3), lbl)
+        painter.setPen(QColor("#00E5FF"))
+        painter.drawText(QPointF(sx1 + 1, sy1 - 4), lbl)
+
+    def _paint_profile_overlay(self, painter: QPainter):
+        # Live drag preview
+        if self._tdrag_start is not None and self._tdrag_now is not None \
+                and self._tool == "profile":
+            painter.setPen(QPen(QColor("#FFE040"), 2.0, Qt.PenStyle.DashLine))
+            painter.drawLine(self._tdrag_start, self._tdrag_now)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor("#FFE040")))
+            painter.drawEllipse(self._tdrag_start, 4, 4)
+            painter.drawEllipse(self._tdrag_now, 4, 4)
+
+        if self._profile_img is None:
+            return
+        ix1, iy1, ix2, iy2 = self._profile_img
+        sx1, sy1 = self._img_to_screen(ix1, iy1)
+        sx2, sy2 = self._img_to_screen(ix2, iy2)
+
+        painter.setPen(QPen(QColor("#FFE040"), 2.0))
+        painter.drawLine(QPointF(sx1, sy1), QPointF(sx2, sy2))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#FFE040")))
+        painter.drawEllipse(QPointF(sx1, sy1), 5, 5)
+        painter.drawEllipse(QPointF(sx2, sy2), 5, 5)
+
+        length = math.sqrt((ix2 - ix1)**2 + (iy2 - iy1)**2)
+        mx, my = (sx1 + sx2) / 2, (sy1 + sy2) / 2
+        lbl = f" {length:.0f} px "
+        painter.setPen(QColor(0, 0, 0, 160))
+        painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        painter.drawText(QPointF(mx + 2, my - 3), lbl)
+        painter.setPen(QColor("#FFE040"))
+        painter.drawText(QPointF(mx + 1, my - 4), lbl)
+
+    def _paint_measure_overlay(self, painter: QPainter):
+        def _draw(sx1, sy1, sx2, sy2, ix1, iy1, ix2, iy2, dashed=False):
+            style = Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.5, style))
+            painter.drawLine(QPointF(sx1, sy1), QPointF(sx2, sy2))
+            # End tick marks
+            painter.drawLine(QPointF(sx1 - 5, sy1), QPointF(sx1 + 5, sy1))
+            painter.drawLine(QPointF(sx2 - 5, sy2), QPointF(sx2 + 5, sy2))
+            # Distance label
+            dx = ix2 - ix1;  dy = iy2 - iy1
+            dist_px = math.sqrt(dx * dx + dy * dy)
+            angle   = math.degrees(math.atan2(abs(dy), abs(dx)))
+            parts   = [f"{dist_px:.1f} px"]
+            if self._mm_per_px > 0:
+                parts.append(f"{dist_px * self._mm_per_px:.3f} mm")
+            parts.append(f"∠{angle:.1f}°")
+            lbl = "  ".join(parts)
+            mx, my = (sx1 + sx2) / 2, (sy1 + sy2) / 2
+            painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+            painter.setPen(QColor(0, 0, 0, 180))
+            painter.drawText(QPointF(mx + 2, my - 3), lbl)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(QPointF(mx + 1, my - 4), lbl)
+
+        if self._tdrag_start is not None and self._tdrag_now is not None \
+                and self._tool == "measure":
+            sx1, sy1 = self._tdrag_start.x(), self._tdrag_start.y()
+            sx2, sy2 = self._tdrag_now.x(),   self._tdrag_now.y()
+            ix1, iy1 = self.pixel_at(int(sx1), int(sy1))
+            ix2, iy2 = self.pixel_at(int(sx2), int(sy2))
+            _draw(sx1, sy1, sx2, sy2, ix1, iy1, ix2, iy2, dashed=True)
+
+        if self._measure_img is not None:
+            ix1, iy1, ix2, iy2 = self._measure_img
+            sx1, sy1 = self._img_to_screen(ix1, iy1)
+            sx2, sy2 = self._img_to_screen(ix2, iy2)
+            _draw(sx1, sy1, sx2, sy2, ix1, iy1, ix2, iy2, dashed=False)
+
+    def _paint_annotations(self, painter: QPainter):
+        font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        painter.setFont(font)
+
+        for i, ann in enumerate(self._annotations):
+            ix, iy  = ann["ix"], ann["iy"]
+            label   = ann.get("label", "Other")
+            sx, sy  = self._img_to_screen(ix, iy)
+
+            cstr  = _ANN_COLORS.get(label, "#00B0FF")
+            color = QColor(cstr)
+
+            # Circle
+            r = 10
+            painter.setPen(QPen(color, 2.0))
+            painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 55)))
+            painter.drawEllipse(QPointF(sx, sy), r, r)
+
+            # Crosshair
+            painter.setPen(QPen(color, 1.5))
+            painter.drawLine(QPointF(sx - 6, sy), QPointF(sx + 6, sy))
+            painter.drawLine(QPointF(sx, sy - 6), QPointF(sx, sy + 6))
+
+            # Label with dark shadow
+            text = f"#{i + 1} {label}"
+            painter.setPen(QColor(0, 0, 0, 180))
+            painter.drawText(QPointF(sx + r + 3, sy + 1), text)
+            painter.setPen(color)
+            painter.drawText(QPointF(sx + r + 2, sy), text)
 
     # ── Texture upload ────────────────────────────────────────────────────
 
@@ -443,7 +667,7 @@ class GLImageViewer(QOpenGLWidget):
         glBindTexture(GL_TEXTURE_2D, self._tex_heatmap)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        # GL_NEAREST = sharp cell boundaries (no blurry interpolation between cells)
+        # GL_NEAREST = sharp cell boundaries (no interpolation between cells)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
 
@@ -473,16 +697,25 @@ class GLImageViewer(QOpenGLWidget):
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Left drag = pan
-            self._drag_start  = event.position()
-            self._drag_offset = QPointF(self._offset)
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if self._tool == "navigate":
+                self._drag_start  = event.position()
+                self._drag_offset = QPointF(self._offset)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            else:
+                self._tdrag_start = event.position()
+                self._tdrag_now   = event.position()
         elif event.button() == Qt.MouseButton.RightButton:
-            # Right drag = rubber-band zoom
-            self._rb_start   = event.position()
-            self._rb_current = event.position()
+            if self._tool == "navigate":
+                self._rb_start   = event.position()
+                self._rb_current = event.position()
+            else:
+                # Right drag = pan in all tool modes
+                self._drag_start  = event.position()
+                self._drag_offset = QPointF(self._offset)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        # Pan (navigate left-drag or tool right-drag)
         if self._drag_start and self._drag_offset:
             d = event.position() - self._drag_start
             self._offset = QPointF(self._drag_offset.x() + d.x(),
@@ -491,15 +724,21 @@ class GLImageViewer(QOpenGLWidget):
                 self.view_state_changed.emit(self._zoom, self._offset.x(), self._offset.y())
             self.update()
 
+        # Rubber-band zoom preview
         if self._rb_start is not None:
             self._rb_current = event.position()
             self.update()
 
+        # Tool drag live preview
+        if self._tdrag_start is not None:
+            self._tdrag_now = event.position()
+            self.update()
+
+        # Pixel hover readout
         if self._image is not None:
             ix, iy = self.pixel_at(int(event.position().x()), int(event.position().y()))
             h, w = self._image.shape[:2]
             if 0 <= ix < w and 0 <= iy < h:
-                # Only emit when pixel coordinate changes — avoids inspector repaints during pan
                 if ix != self._last_hover_ix or iy != self._last_hover_iy:
                     self._last_hover_ix = ix
                     self._last_hover_iy = iy
@@ -507,15 +746,67 @@ class GLImageViewer(QOpenGLWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start  = None
-            self._drag_offset = None
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            if self._tool == "navigate":
+                self._drag_start  = None
+                self._drag_offset = None
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self._finalize_tool_action()
+                self._tdrag_start = None
+                self._tdrag_now   = None
+                self.update()
+
         elif event.button() == Qt.MouseButton.RightButton:
-            if self._rb_start is not None:
-                self._zoom_to_rubber_band()
-            self._rb_start   = None
-            self._rb_current = None
-            self.update()
+            if self._tool == "navigate":
+                if self._rb_start is not None:
+                    self._zoom_to_rubber_band()
+                self._rb_start   = None
+                self._rb_current = None
+                self.update()
+            else:
+                self._drag_start  = None
+                self._drag_offset = None
+                self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _finalize_tool_action(self):
+        if self._tdrag_start is None or self._tdrag_now is None:
+            return
+
+        sx1, sy1 = self._tdrag_start.x(), self._tdrag_start.y()
+        sx2, sy2 = self._tdrag_now.x(),   self._tdrag_now.y()
+        ix1, iy1 = self.pixel_at(int(sx1), int(sy1))
+        ix2, iy2 = self.pixel_at(int(sx2), int(sy2))
+
+        # Clamp to image bounds
+        if self._image is not None:
+            H, W = self._image.shape[:2]
+            ix1 = max(0, min(ix1, W - 1));  iy1 = max(0, min(iy1, H - 1))
+            ix2 = max(0, min(ix2, W - 1));  iy2 = max(0, min(iy2, H - 1))
+
+        move_px = math.sqrt((sx2 - sx1)**2 + (sy2 - sy1)**2)
+
+        if self._tool == "roi":
+            w_px = abs(ix2 - ix1);  h_px = abs(iy2 - iy1)
+            if w_px > 4 and h_px > 4:
+                self._roi_img = (min(ix1, ix2), min(iy1, iy2),
+                                 max(ix1, ix2), max(iy1, iy2))
+                self.roi_selected.emit(*self._roi_img)
+
+        elif self._tool == "profile":
+            dist = math.sqrt((ix2 - ix1)**2 + (iy2 - iy1)**2)
+            if dist > 5:
+                self._profile_img = (ix1, iy1, ix2, iy2)
+                self.line_profile_drawn.emit(ix1, iy1, ix2, iy2)
+
+        elif self._tool == "annotate":
+            if move_px < 6:   # click (not drag)
+                self.annotation_placed.emit(ix1, iy1)
+
+        elif self._tool == "measure":
+            dist = math.sqrt((ix2 - ix1)**2 + (iy2 - iy1)**2)
+            if dist > 2:
+                self._measure_img = (ix1, iy1, ix2, iy2)
+                self.measure_done.emit(ix1, iy1, ix2, iy2)
 
     def _zoom_to_rubber_band(self):
         if self._rb_start is None or self._rb_current is None:
@@ -525,7 +816,6 @@ class GLImageViewer(QOpenGLWidget):
         if abs(x2 - x1) < 5 or abs(y2 - y1) < 5:
             return
 
-        # Convert screen rectangle to image coordinates
         ix1 = (min(x1, x2) - self._offset.x()) / self._zoom
         iy1 = (min(y1, y2) - self._offset.y()) / self._zoom
         ix2 = (max(x1, x2) - self._offset.x()) / self._zoom
@@ -535,16 +825,14 @@ class GLImageViewer(QOpenGLWidget):
         ix2 = min(float(self._img_w), ix2)
         iy2 = min(float(self._img_h), iy2)
 
-        roi_w = ix2 - ix1
-        roi_h = iy2 - iy1
+        roi_w = ix2 - ix1;  roi_h = iy2 - iy1
         if roi_w <= 0 or roi_h <= 0:
             return
 
         new_zoom = min(self.width() / roi_w, self.height() / roi_h) * 0.95
         new_zoom = max(0.02, min(new_zoom, 64.0))
 
-        cx = (ix1 + ix2) / 2
-        cy = (iy1 + iy2) / 2
+        cx = (ix1 + ix2) / 2;  cy = (iy1 + iy2) / 2
         self._zoom   = new_zoom
         self._offset = QPointF(
             self.width()  / 2 - cx * new_zoom,
