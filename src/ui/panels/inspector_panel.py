@@ -522,6 +522,11 @@ class InspectorPanel(QScrollArea):
         self._meas_hint.setVisible(False)
         self._measure_group.setVisible(True)
 
+    def scroll_to(self, widget: QWidget):
+        """Scroll the inspector so that widget is visible."""
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(50, lambda: self.ensureWidgetVisible(widget, 0, 20))
+
     def set_calibration_label(self, mm_per_px: float):
         if mm_per_px > 0:
             self._calib_lbl.setText(f"Scale: {mm_per_px:.6f} mm/px")
