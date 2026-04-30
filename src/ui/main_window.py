@@ -1,12 +1,27 @@
-"""Main application window — orchestrates all panels."""
+"""
+VyuhaAI Image Viewer — Main Window
+Orchestrates all panels. Every signal connected. Nothing isolated.
+
+Signal flow:
+  open_image → GLImageViewer + InspectorPanel + Surface3DPanel + BrowserPanel
+  pipeline_changed → re-process → GLImageViewer + Surface3DPanel
+  analysis_done → InspectorPanel + GLImageViewer heatmap + status bar
+  pixel_hovered → InspectorPanel pixel display
+  zoom_changed → status bar zoom label
+  fusion composite_ready → GLImageViewer
+"""
 
 import os
+import cv2
+import numpy as np
+
 from PyQt6.QtWidgets import (
-    QMainWindow, QDockWidget, QSplitter, QStatusBar,
-    QMenuBar, QMenu, QFileDialog, QMessageBox, QWidget,
+    QMainWindow, QDockWidget, QStatusBar, QMenu,
+    QFileDialog, QMessageBox, QLabel, QWidget,
+    QHBoxLayout, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QKeySequence, QAction
+from PyQt6.QtGui import QKeySequence, QAction, QIcon
 
 from src.core.config import Config
 from src.core.image_data import ImageData
@@ -15,41 +30,54 @@ from src.analysis.focus_engine import FocusEngine
 from src.analysis.quality_engine import QualityEngine
 from src.pipeline.pipeline import Pipeline
 
-from src.ui.panels.viewer_panel import ViewerPanel
+from src.ui.panels.gl_viewer       import GLImageViewer
 from src.ui.panels.inspector_panel import InspectorPanel
-from src.ui.panels.pipeline_panel import PipelinePanel
-from src.ui.panels.browser_panel import BrowserPanel
-from src.ui.panels.fusion_panel import FusionPanel
+from src.ui.panels.pipeline_panel  import PipelinePanel
+from src.ui.panels.browser_panel   import BrowserPanel
+from src.ui.panels.fusion_panel    import FusionPanel
+from src.ui.panels.surface_3d_panel import Surface3DPanel
+from src.ui.theme import VERDICT_COLOR, COLOR_PERFECT, COLOR_WARN, COLOR_FAIL
 
+
+# ── Background analysis worker ─────────────────────────────────────────────
 
 class AnalysisWorker(QThread):
-    """Run focus + quality analysis off the main thread."""
-    finished = pyqtSignal(object, object)  # FocusResult, QualityResult
+    """Runs focus + quality analysis off the UI thread — never blocks display."""
+    finished = pyqtSignal(object, object)   # FocusResult, QualityResult
 
-    def __init__(self, image_data: ImageData, focus_engine: FocusEngine, quality_engine: QualityEngine):
+    def __init__(self, image: np.ndarray, focus: FocusEngine, quality: QualityEngine):
         super().__init__()
-        self._image = image_data
-        self._focus = focus_engine
-        self._quality = quality_engine
+        self._image   = image
+        self._focus   = focus
+        self._quality = quality
 
     def run(self):
-        if self._image.raw is None:
-            return
-        focus_result  = self._focus.analyze(self._image.raw)
-        quality_result = self._quality.analyze(self._image.raw)
+        focus_result   = self._focus.analyze(self._image)
+        quality_result = self._quality.analyze(self._image)
         self.finished.emit(focus_result, quality_result)
 
 
+# ── Main Window ────────────────────────────────────────────────────────────
+
 class MainWindow(QMainWindow):
+
     def __init__(self, config: Config):
         super().__init__()
-        self.config = config
+        self.config  = config
         self.current_image: ImageData = ImageData()
         self.folder_images: list[str] = []
-        self.folder_index: int = -1
+        self.folder_index:  int       = -1
         self._analysis_worker: AnalysisWorker | None = None
 
-        self.focus_engine   = FocusEngine(metric=config.focus_metric, grid=config.focus_grid_size)
+        self.focus_engine   = FocusEngine(
+            metric=config.focus_metric,
+            grid=config.focus_grid_size,
+        )
+        self.focus_engine.set_thresholds(
+            config.focus_thresholds.perfect,
+            config.focus_thresholds.good,
+            config.focus_thresholds.soft,
+        )
         self.quality_engine = QualityEngine(
             overexpose_threshold=config.overexpose_threshold,
             underexpose_threshold=config.underexpose_threshold,
@@ -57,126 +85,195 @@ class MainWindow(QMainWindow):
         self.pipeline = Pipeline()
 
         self._build_ui()
+        self._connect_signals()
         self._build_menu()
-        self._build_shortcuts()
         self._restore_geometry()
 
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
     #  UI Construction
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
 
     def _build_ui(self):
         self.setWindowTitle("VyuhaAI Image Viewer")
 
-        # Central viewer
-        self.viewer = ViewerPanel(self.config)
+        # ── Central widget: OpenGL viewer ──────────────────────────
+        self.viewer = GLImageViewer()
+        self.viewer.setAcceptDrops(True)
         self.setCentralWidget(self.viewer)
 
-        # Inspector dock (right)
+        # ── Inspector dock (right) ─────────────────────────────────
         self.inspector = InspectorPanel()
-        dock_inspector = QDockWidget("Inspector", self)
-        dock_inspector.setWidget(self.inspector)
-        dock_inspector.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_inspector)
+        self._dock_inspector = self._make_dock(
+            "Inspector", self.inspector,
+            Qt.DockWidgetArea.RightDockWidgetArea,
+        )
 
-        # Pipeline dock (bottom-right)
+        # ── Pipeline dock (bottom) ─────────────────────────────────
         self.pipeline_panel = PipelinePanel(self.pipeline)
-        self.pipeline_panel.pipeline_changed.connect(self._on_pipeline_changed)
-        dock_pipeline = QDockWidget("Processing Pipeline", self)
-        dock_pipeline.setWidget(self.pipeline_panel)
-        dock_pipeline.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock_pipeline)
+        self._dock_pipeline = self._make_dock(
+            "⚙  Processing Pipeline", self.pipeline_panel,
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+        )
+        self._dock_pipeline.setMinimumHeight(180)
 
-        # Browser dock (left)
+        # ── Browser dock (left) ────────────────────────────────────
         self.browser = BrowserPanel()
-        self.browser.image_selected.connect(self.open_image)
-        dock_browser = QDockWidget("File Browser", self)
-        dock_browser.setWidget(self.browser)
-        dock_browser.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock_browser)
+        self._dock_browser = self._make_dock(
+            "File Browser", self.browser,
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+        )
 
-        # Fusion dock (bottom)
+        # ── 3D Surface dock (right, tabbed with inspector) ─────────
+        self.surface_3d = Surface3DPanel()
+        self._dock_3d = self._make_dock(
+            "◈  3D Surface View", self.surface_3d,
+            Qt.DockWidgetArea.RightDockWidgetArea,
+        )
+        self.tabifyDockWidget(self._dock_inspector, self._dock_3d)
+        self._dock_inspector.raise_()   # Inspector on top by default
+
+        # ── Fusion dock (bottom, hidden by default) ────────────────
         self.fusion_panel = FusionPanel()
-        self.fusion_panel.composite_ready.connect(self._on_composite_ready)
-        dock_fusion = QDockWidget("Illumination Fusion", self)
-        dock_fusion.setWidget(self.fusion_panel)
-        dock_fusion.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock_fusion)
-        dock_fusion.hide()   # Hidden by default, open from menu
+        self._dock_fusion = self._make_dock(
+            "⊕  Illumination Fusion", self.fusion_panel,
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+        )
+        self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
+        self._dock_pipeline.raise_()
 
-        # Store dock references for menu toggle
+        # ── Status bar ─────────────────────────────────────────────
+        self._build_status_bar()
+
+        # Store all docks for menu toggle
         self._docks = {
-            "inspector": dock_inspector,
-            "pipeline":  dock_pipeline,
-            "browser":   dock_browser,
-            "fusion":    dock_fusion,
+            "Inspector":          self._dock_inspector,
+            "3D Surface View":    self._dock_3d,
+            "Processing Pipeline":self._dock_pipeline,
+            "Illumination Fusion":self._dock_fusion,
+            "File Browser":       self._dock_browser,
         }
 
-        # Status bar
-        self.status = QStatusBar()
-        self.setStatusBar(self.status)
-        self.status.showMessage("VyuhaAI Image Viewer  —  Open an image or folder  (Ctrl+O)")
+    def _make_dock(self, title: str, widget: QWidget,
+                   area: Qt.DockWidgetArea) -> QDockWidget:
+        dock = QDockWidget(title, self)
+        dock.setWidget(widget)
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea   |
+            Qt.DockWidgetArea.RightDockWidgetArea  |
+            Qt.DockWidgetArea.BottomDockWidgetArea |
+            Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        self.addDockWidget(area, dock)
+        return dock
+
+    def _build_status_bar(self):
+        sb = QStatusBar()
+        sb.setSizeGripEnabled(True)
+
+        # Left: filename + metrics
+        self._status_main = QLabel("VyuhaAI Image Viewer  —  Open an image  (Ctrl+O)")
+        self._status_main.setStyleSheet("color: #8888AA; padding: 0 8px;")
+
+        # Right: zoom level
+        self._status_zoom = QLabel("Zoom: —")
+        self._status_zoom.setStyleSheet("color: #00B4D8; padding: 0 8px; font-weight: 600;")
+        self._status_zoom.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # Right: focus verdict badge
+        self._status_verdict = QLabel("")
+        self._status_verdict.setStyleSheet("padding: 0 10px; font-weight: 700;")
+
+        sb.addWidget(self._status_main, stretch=1)
+        sb.addPermanentWidget(self._status_verdict)
+        sb.addPermanentWidget(self._status_zoom)
+        self.setStatusBar(sb)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Signal Wiring — everything connected to everything
+    # ═══════════════════════════════════════════════════════════════
+
+    def _connect_signals(self):
+        # Viewer → status bar zoom
+        self.viewer.zoom_changed.connect(self._on_zoom_changed)
+
+        # Viewer → inspector pixel display (live on mouse move)
+        self.viewer.pixel_hovered.connect(self._on_pixel_hovered)
+
+        # Browser → open image
+        self.browser.image_selected.connect(self.open_image)
+
+        # Pipeline → re-process and update viewer + 3D
+        self.pipeline_panel.pipeline_changed.connect(self._on_pipeline_changed)
+
+        # Fusion → send composite to viewer
+        self.fusion_panel.composite_ready.connect(self._on_composite_ready)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Menu
+    # ═══════════════════════════════════════════════════════════════
 
     def _build_menu(self):
         mb = self.menuBar()
 
-        # File
-        file_menu = mb.addMenu("&File")
-        self._add_action(file_menu, "Open Image...",  self._menu_open_image,  "Ctrl+O")
-        self._add_action(file_menu, "Open Folder...", self._menu_open_folder, "Ctrl+Shift+O")
-        file_menu.addSeparator()
-        self._add_action(file_menu, "Save Processed Image...", self._menu_save, "Ctrl+S")
-        file_menu.addSeparator()
-        self._add_action(file_menu, "Exit", self.close, "Alt+F4")
+        # ── File ───────────────────────────────────────────────────
+        m = mb.addMenu("&File")
+        self._action(m, "Open Image…",     self._menu_open_image,  "Ctrl+O")
+        self._action(m, "Open Folder…",    self._menu_open_folder, "Ctrl+Shift+O")
+        m.addSeparator()
+        self._action(m, "Save Processed Image…", self._menu_save,  "Ctrl+S")
+        m.addSeparator()
+        self._action(m, "Exit",            self.close,             "Alt+F4")
 
-        # View
-        view_menu = mb.addMenu("&View")
-        self._add_action(view_menu, "Fit to Window",  self.viewer.fit_to_window, "Space")
-        self._add_action(view_menu, "100% Zoom",      lambda: self.viewer.set_zoom(1.0), "1")
-        self._add_action(view_menu, "200% Zoom",      lambda: self.viewer.set_zoom(2.0), "2")
-        self._add_action(view_menu, "50% Zoom",       lambda: self.viewer.set_zoom(0.5))
-        view_menu.addSeparator()
-        self._add_action(view_menu, "Toggle Focus Heatmap", self.viewer.toggle_heatmap, "F")
-        self._add_action(view_menu, "Toggle Histogram",     self.inspector.toggle_histogram, "H")
-        view_menu.addSeparator()
+        # ── View ───────────────────────────────────────────────────
+        m = mb.addMenu("&View")
+        self._action(m, "Fit to Window",   self.viewer.fit_to_window,          "Space")
+        self._action(m, "100% Zoom",       lambda: self.viewer.set_zoom(1.0),  "1")
+        self._action(m, "200% Zoom",       lambda: self.viewer.set_zoom(2.0),  "2")
+        self._action(m, "400% Zoom",       lambda: self.viewer.set_zoom(4.0),  "4")
+        self._action(m, "50% Zoom",        lambda: self.viewer.set_zoom(0.5),  "5")
+        m.addSeparator()
+        self._action(m, "Toggle Focus Heatmap",  self.viewer.toggle_heatmap, "F")
+        self._action(m, "Toggle Histogram",      self.inspector.toggle_histogram, "H")
+        m.addSeparator()
         for name, dock in self._docks.items():
-            action = dock.toggleViewAction()
-            view_menu.addAction(action)
+            m.addAction(dock.toggleViewAction())
 
-        # Navigate
-        nav_menu = mb.addMenu("&Navigate")
-        self._add_action(nav_menu, "Previous Image", self._prev_image, "Left")
-        self._add_action(nav_menu, "Next Image",     self._next_image, "Right")
+        # ── Navigate ───────────────────────────────────────────────
+        m = mb.addMenu("&Navigate")
+        self._action(m, "Previous Image",  self._prev_image, "Left")
+        self._action(m, "Next Image",      self._next_image, "Right")
+        self._action(m, "First Image",     self._first_image, "Home")
+        self._action(m, "Last Image",      self._last_image,  "End")
 
-        # Pipeline
-        pipe_menu = mb.addMenu("&Pipeline")
-        self._add_action(pipe_menu, "Clear Pipeline",  self._clear_pipeline)
-        self._add_action(pipe_menu, "Save Pipeline...", self._save_pipeline)
-        self._add_action(pipe_menu, "Load Pipeline...", self._load_pipeline)
+        # ── Pipeline ───────────────────────────────────────────────
+        m = mb.addMenu("&Pipeline")
+        self._action(m, "Clear Pipeline",   self._clear_pipeline)
+        self._action(m, "Save Pipeline…",   self._save_pipeline,  "Ctrl+Shift+S")
+        self._action(m, "Load Pipeline…",   self._load_pipeline,  "Ctrl+Shift+L")
 
-        # Tools
-        tools_menu = mb.addMenu("&Tools")
-        self._add_action(tools_menu, "Toggle Illumination Fusion", lambda: self._docks["fusion"].setVisible(not self._docks["fusion"].isVisible()))
+        # ── Tools ──────────────────────────────────────────────────
+        m = mb.addMenu("&Tools")
+        self._action(m, "Illumination Fusion",
+                     lambda: self._toggle_dock(self._dock_fusion), "Ctrl+F")
+        self._action(m, "3D Surface View",
+                     lambda: self._toggle_dock(self._dock_3d),    "Ctrl+3")
 
-    def _build_shortcuts(self):
-        pass  # Shortcuts handled in menu via QKeySequence
-
-    def _add_action(self, menu: QMenu, label: str, slot, shortcut: str = ""):
-        action = QAction(label, self)
+    def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
+        a = QAction(label, self)
         if shortcut:
-            action.setShortcut(QKeySequence(shortcut))
-        action.triggered.connect(slot)
-        menu.addAction(action)
-        return action
+            a.setShortcut(QKeySequence(shortcut))
+        a.triggered.connect(slot)
+        menu.addAction(a)
+        return a
 
-    def _restore_geometry(self):
-        self.resize(self.config.window_width, self.config.window_height)
-        if self.config.window_maximized:
-            self.showMaximized()
+    def _toggle_dock(self, dock: QDockWidget):
+        dock.setVisible(not dock.isVisible())
+        if dock.isVisible():
+            dock.raise_()
 
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
     #  Image Loading
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
 
     def open_image(self, path: str):
         try:
@@ -187,51 +284,121 @@ class MainWindow(QMainWindow):
 
         self.config.add_recent(path)
         self.config.save()
+        self.browser.highlight_path(path)
 
+        # Display immediately — analysis runs in background
         self._display_current()
         self._run_analysis()
-        self.status.showMessage(f"{self.current_image.filename}  —  {self.current_image.shape_str()}")
+
+        self._status_main.setText(
+            f"  {self.current_image.filename}   "
+            f"{self.current_image.shape_str()}"
+        )
+        self._status_verdict.setText("")
 
     def _display_current(self):
         if not self.current_image.is_loaded():
             return
+
+        # Apply pipeline (CPU — only on visible region in future tile version)
         processed = self.pipeline.process(self.current_image.raw)
         self.current_image.display = processed
-        self.viewer.set_image(processed, self.current_image)
+
+        # Update OpenGL viewer — GPU upload, instant display
+        self.viewer.set_image(processed)
+
+        # Update 3D surface with processed image
+        self.surface_3d.set_image(processed)
+
+        # Update histogram in inspector
+        hist_data = self.quality_engine.compute_histogram(processed)
+        self.inspector.update_histogram(hist_data)
 
     def _run_analysis(self):
         if not self.current_image.is_loaded():
             return
+        # Cancel previous worker if still running
         if self._analysis_worker and self._analysis_worker.isRunning():
             self._analysis_worker.quit()
+            self._analysis_worker.wait()
+
         self._analysis_worker = AnalysisWorker(
-            self.current_image, self.focus_engine, self.quality_engine
+            self.current_image.raw,
+            self.focus_engine,
+            self.quality_engine,
         )
         self._analysis_worker.finished.connect(self._on_analysis_done)
         self._analysis_worker.start()
 
+    # ═══════════════════════════════════════════════════════════════
+    #  Signal Handlers
+    # ═══════════════════════════════════════════════════════════════
+
     def _on_analysis_done(self, focus_result, quality_result):
-        self.current_image.focus_score   = focus_result.score
-        self.current_image.focus_verdict = focus_result.verdict
-        self.current_image.focus_map     = focus_result.heatmap
-        self.current_image.quality_score = quality_result.overall_score
+        """Called from background thread — update all panels with results."""
+        # Store on image data
+        self.current_image.focus_score    = focus_result.score
+        self.current_image.focus_verdict  = focus_result.verdict
+        self.current_image.focus_map      = focus_result.heatmap
+        self.current_image.quality_score  = quality_result.overall_score
         self.current_image.quality_verdict = quality_result.verdict
 
+        # Inspector: focus + quality metrics
         self.inspector.update_focus(focus_result)
         self.inspector.update_quality(quality_result)
-        self.viewer.set_focus_map(focus_result.heatmap)
 
-        verdict_color = {"PERFECT": "green", "GOOD": "limegreen", "SOFT": "orange", "BLURRY": "red"}
-        color = verdict_color.get(focus_result.verdict, "white")
-        self.status.showMessage(
-            f"{self.current_image.filename}  —  "
-            f"Focus: {focus_result.score:.0f} [{focus_result.verdict}]  —  "
-            f"Quality: {quality_result.overall_score:.0f}/100 [{quality_result.verdict}]"
+        # Viewer: focus heatmap overlay
+        heatmap_rgb = self.focus_engine.heatmap_to_rgb(focus_result.heatmap)
+        self.viewer.set_heatmap(heatmap_rgb)
+
+        # Status bar: color-coded verdict
+        self._update_status_verdict(focus_result, quality_result)
+
+    def _on_pipeline_changed(self):
+        """Pipeline layer added/removed/changed → re-process and update all views."""
+        self._display_current()
+
+    def _on_composite_ready(self, composite: np.ndarray):
+        """Fusion panel produced a composite → show in viewer and 3D."""
+        self.viewer.set_image(composite)
+        self.surface_3d.set_image(composite)
+        hist_data = self.quality_engine.compute_histogram(composite)
+        self.inspector.update_histogram(hist_data)
+
+    def _on_pixel_hovered(self, x: int, y: int, pixel):
+        """Mouse moved over viewer → update pixel inspector."""
+        self.inspector.update_pixel(x, y, pixel)
+
+    def _on_zoom_changed(self, zoom: float):
+        """Viewer zoom changed → update status bar zoom label."""
+        pct = zoom * 100
+        if pct >= 100:
+            self._status_zoom.setText(f"  {pct:.0f}%  ")
+        else:
+            self._status_zoom.setText(f"  {pct:.1f}%  ")
+
+    def _update_status_verdict(self, focus_result, quality_result):
+        f = focus_result
+        q = quality_result
+        fcolor = VERDICT_COLOR.get(f.verdict, "#888")
+        qcolor = COLOR_PERFECT if q.verdict == "PASS" else COLOR_FAIL
+
+        self._status_main.setText(
+            f"  {self.current_image.filename}   "
+            f"{self.current_image.shape_str()}   │   "
+            f"Focus: {f.score:.0f}   │   "
+            f"Quality: {q.overall_score:.0f}/100"
+        )
+        self._status_verdict.setText(
+            f"  {f.verdict}  ·  {q.verdict}  "
+        )
+        self._status_verdict.setStyleSheet(
+            f"color: {fcolor}; padding: 0 10px; font-weight: 700; font-size: 11px;"
         )
 
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
     #  Navigation
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
 
     def _prev_image(self):
         if self.folder_index > 0:
@@ -243,12 +410,19 @@ class MainWindow(QMainWindow):
             self.folder_index += 1
             self.open_image(self.folder_images[self.folder_index])
 
-    # ------------------------------------------------------------------ #
-    #  Pipeline
-    # ------------------------------------------------------------------ #
+    def _first_image(self):
+        if self.folder_images:
+            self.folder_index = 0
+            self.open_image(self.folder_images[0])
 
-    def _on_pipeline_changed(self):
-        self._display_current()
+    def _last_image(self):
+        if self.folder_images:
+            self.folder_index = len(self.folder_images) - 1
+            self.open_image(self.folder_images[-1])
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Pipeline
+    # ═══════════════════════════════════════════════════════════════
 
     def _clear_pipeline(self):
         self.pipeline.clear()
@@ -256,72 +430,83 @@ class MainWindow(QMainWindow):
         self._display_current()
 
     def _save_pipeline(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Pipeline", "", "Pipeline Files (*.pipeline)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Pipeline", "", "VyuhaAI Pipeline (*.pipeline)"
+        )
         if path:
             self.pipeline.save(path)
 
     def _load_pipeline(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load Pipeline", "", "Pipeline Files (*.pipeline)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Pipeline", "", "VyuhaAI Pipeline (*.pipeline)"
+        )
         if path:
             self.pipeline.load(path)
             self.pipeline_panel.refresh()
             self._display_current()
 
-    # ------------------------------------------------------------------ #
-    #  Fusion
-    # ------------------------------------------------------------------ #
-
-    def _on_composite_ready(self, composite):
-        self.viewer.set_image(composite, self.current_image)
-
-    # ------------------------------------------------------------------ #
-    #  Menu handlers
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
+    #  Menu Handlers
+    # ═══════════════════════════════════════════════════════════════
 
     def _menu_open_image(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Image", self.config.last_folder,
-            "Images (*.tiff *.tif *.png *.bmp *.jpg *.jpeg *.pgm *.ppm *.exr *.hdr)"
+            "All Images (*.tiff *.tif *.png *.bmp *.jpg *.jpeg *.pgm *.ppm *.exr *.hdr);;"
+            "TIFF (*.tiff *.tif);;PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp);;All Files (*)"
         )
-        if path:
-            self.config.last_folder = os.path.dirname(path)
-            folder = os.path.dirname(path)
-            self.folder_images = list_images_in_folder(folder)
-            self.folder_index  = self.folder_images.index(path) if path in self.folder_images else -1
-            self.browser.set_folder(folder)
-            self.open_image(path)
+        if not path:
+            return
+        folder = os.path.dirname(path)
+        self.config.last_folder = folder
+        self.folder_images = list_images_in_folder(folder)
+        self.folder_index  = self.folder_images.index(path) if path in self.folder_images else -1
+        self.browser.set_folder(folder)
+        self.open_image(path)
 
     def _menu_open_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Open Folder", self.config.last_folder)
-        if folder:
-            self.config.last_folder = folder
-            self.folder_images = list_images_in_folder(folder)
-            self.folder_index  = 0
-            self.browser.set_folder(folder)
-            if self.folder_images:
-                self.open_image(self.folder_images[0])
+        folder = QFileDialog.getExistingDirectory(
+            self, "Open Folder", self.config.last_folder
+        )
+        if not folder:
+            return
+        self.config.last_folder = folder
+        self.folder_images = list_images_in_folder(folder)
+        self.folder_index  = 0
+        self.browser.set_folder(folder)
+        if self.folder_images:
+            self.open_image(self.folder_images[0])
 
     def _menu_save(self):
         if self.current_image.display is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Image", "", "PNG (*.png);;TIFF (*.tiff);;BMP (*.bmp)"
+            self, "Save Processed Image", "",
+            "PNG (*.png);;TIFF (*.tiff);;BMP (*.bmp);;JPEG (*.jpg)"
         )
-        if path:
-            import cv2
-            img = self.current_image.display
-            if img.ndim == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(path, img)
-            self.status.showMessage(f"Saved: {path}")
+        if not path:
+            return
+        img = self.current_image.display
+        if img.ndim == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(path, img)
+        self._status_main.setText(f"  Saved: {path}")
 
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
     #  Lifecycle
-    # ------------------------------------------------------------------ #
+    # ═══════════════════════════════════════════════════════════════
+
+    def _restore_geometry(self):
+        self.resize(self.config.window_width, self.config.window_height)
+        if self.config.window_maximized:
+            self.showMaximized()
 
     def closeEvent(self, event):
-        self.config.window_width  = self.width()
-        self.config.window_height = self.height()
+        if self._analysis_worker and self._analysis_worker.isRunning():
+            self._analysis_worker.quit()
+            self._analysis_worker.wait()
+        self.config.window_width     = self.width()
+        self.config.window_height    = self.height()
         self.config.window_maximized = self.isMaximized()
         self.config.save()
         super().closeEvent(event)
