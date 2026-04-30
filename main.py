@@ -12,14 +12,23 @@ from src.core.config import Config
 from src.ui.theme import get_stylesheet
 
 
+APP_NAME    = "VyuhaAI Image Viewer"
+APP_VERSION = "1.0.0"
+APP_ORG     = "VyuhaAI"
+LOGO_PATH   = os.path.join(os.path.dirname(__file__), "resources", "icons", "logo.png")
+
+
 def main():
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
     app = QApplication(sys.argv)
-    app.setApplicationName("YVR Advanced Image Viewer")
-    app.setApplicationVersion("1.0.0")
-    app.setOrganizationName("YVR")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName(APP_ORG)
     app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
     app.setStyleSheet(get_stylesheet())
+
+    if os.path.exists(LOGO_PATH):
+        app.setWindowIcon(QIcon(LOGO_PATH))
 
     config = Config()
     config.load()

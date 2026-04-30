@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _build_ui(self):
-        self.setWindowTitle("YVR Advanced Image Viewer")
+        self.setWindowTitle("VyuhaAI Image Viewer")
 
         # Central viewer
         self.viewer = ViewerPanel(self.config)
@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
         # Status bar
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.status.showMessage("Ready — Open an image or folder")
+        self.status.showMessage("VyuhaAI Image Viewer  —  Open an image or folder  (Ctrl+O)")
 
     def _build_menu(self):
         mb = self.menuBar()
