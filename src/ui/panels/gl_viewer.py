@@ -80,14 +80,18 @@ class GLImageViewer(QOpenGLWidget):
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def set_image(self, image: np.ndarray):
+    def set_image(self, image: np.ndarray, preserve_view: bool = False):
         """Upload new image to GPU. Any size, any bit depth."""
+        old_w, old_h = self._img_w, self._img_h
         self._image = image
         self._img_h, self._img_w = image.shape[:2]
         self.makeCurrent()
         self._upload_image_texture(image)
         self.doneCurrent()
-        self.fit_to_window()
+        if preserve_view and old_w == self._img_w and old_h == self._img_h:
+            self.update()
+        else:
+            self.fit_to_window()
 
     def set_heatmap(self, heatmap_rgb: np.ndarray | None):
         self._heatmap = heatmap_rgb
@@ -99,6 +103,10 @@ class GLImageViewer(QOpenGLWidget):
 
     def toggle_heatmap(self):
         self._show_heatmap = not self._show_heatmap
+        self.update()
+
+    def set_heatmap_visible(self, visible: bool):
+        self._show_heatmap = visible
         self.update()
 
     def fit_to_window(self):

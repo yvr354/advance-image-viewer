@@ -99,15 +99,16 @@ class FocusEngine:
 
     def _build_heatmap(self, gray: np.ndarray) -> np.ndarray:
         h, w = gray.shape
-        gh, gw = self.grid, self.grid
-        cell_h = h // gh
-        cell_w = w // gw
+        gh = max(1, min(int(self.grid), h))
+        gw = max(1, min(int(self.grid), w))
         heatmap = np.zeros((gh, gw), dtype=np.float32)
 
         for row in range(gh):
             for col in range(gw):
-                y0, y1 = row * cell_h, (row + 1) * cell_h
-                x0, x1 = col * cell_w, (col + 1) * cell_w
+                y0 = int(row * h / gh)
+                y1 = int((row + 1) * h / gh)
+                x0 = int(col * w / gw)
+                x1 = int((col + 1) * w / gw)
                 cell = gray[y0:y1, x0:x1]
                 heatmap[row, col] = self._score(cell)
 

@@ -96,6 +96,7 @@ class QualityEngine:
 
     def compute_histogram(self, image: np.ndarray, bins: int = 256) -> dict:
         """Return histogram data for all channels."""
+        image = self._to_display_8bit(image)
         result = {}
         if image.ndim == 2:
             hist = cv2.calcHist([image], [0], None, [bins], [0, 256])
@@ -144,8 +145,15 @@ class QualityEngine:
 
     @staticmethod
     def _to_gray_8bit(image: np.ndarray) -> np.ndarray:
-        if image.dtype == np.uint16:
-            image = (image >> 8).astype(np.uint8)
+        image = QualityEngine._to_display_8bit(image)
         if image.ndim == 3:
             return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        return image
+
+    @staticmethod
+    def _to_display_8bit(image: np.ndarray) -> np.ndarray:
+        if image.dtype == np.uint16:
+            return (image >> 8).astype(np.uint8)
+        if image.dtype != np.uint8:
+            return cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         return image

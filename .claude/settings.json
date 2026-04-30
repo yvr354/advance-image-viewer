@@ -15,7 +15,23 @@
       "Bash(venv/Scripts/python.exe -c \"import PyQt6; import cv2; import numpy; import pyqtgraph; import OpenGL; print\\('All imports OK'\\)\")",
       "Bash(venv/Scripts/python.exe -m pip install \"PyQt6==6.7.1\" \"PyQt6-Qt6==6.7.1\" \"PyQt6-sip==13.8.0\" --force-reinstall)",
       "Bash(venv/Scripts/python.exe -c ' *)",
-      "Bash(venv/Scripts/python.exe main.py)"
+      "Bash(venv/Scripts/python.exe main.py)",
+      "Bash(venv/Scripts/python.exe -m py_compile src/ui/main_window.py)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(venv/Scripts/pyinstaller --noconfirm --windowed --name \"VyuhaAI_ImageViewer\" --add-data \"resources;resources\" --add-data \"src;src\" --hidden-import PyQt6.QtOpenGL --hidden-import PyQt6.QtOpenGLWidgets --hidden-import pyqtgraph --hidden-import cv2 --hidden-import tifffile --hidden-import imageio --hidden-import pywt --hidden-import skimage main.py)",
+      "Bash(venv/Scripts/python build_exe.py)",
+      "Bash(venv/Scripts/python -m py_compile src/ui/panels/gl_viewer.py src/ui/panels/comparison_panel.py src/ui/main_window.py)",
+      "Bash(venv/Scripts/python -m py_compile src/ui/main_window.py)",
+      "Bash(venv/Scripts/python -m py_compile src/ui/panels/surface_3d_panel.py)",
+      "Bash(venv/Scripts/python -m py_compile src/ui/panels/gl_viewer.py src/ui/panels/comparison_panel.py)",
+      "Bash(venv/Scripts/python -m py_compile src/ui/panels/comparison_panel.py)",
+      "Bash(venv/Scripts/python -c \"from PIL import Image; img=Image.open\\('resources/icons/logo.ico'\\); print\\('ICO OK, sizes:', img.info.get\\('sizes','unknown'\\)\\)\")",
+      "Read(//c/Program Files \\(x86\\)/Inno Setup 6/**)",
+      "Read(//c/Program Files/Inno Setup 6/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Read(//c/Program Files/**)",
+      "Bash(venv/Scripts/python -m py_compile src/ui/main_window.py main.py)",
+      "Bash(venv/Scripts/python -c ' *)"
     ]
   }
 }
