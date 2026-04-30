@@ -254,6 +254,8 @@ class MainWindow(QMainWindow):
         self._action(m, "Toggle Focus Heatmap",  self.viewer.toggle_heatmap, "F")
         self._action(m, "Toggle Histogram",      self.inspector.toggle_histogram, "H")
         m.addSeparator()
+        self._action(m, "Full Image View  (hide all panels)",
+                     self._toggle_all_panels, "Tab")
         self._action(m, "Reset Default Layout",  self._reset_layout, "Ctrl+Shift+R")
         m.addSeparator()
         for name, dock in self._docks.items():
@@ -278,8 +280,8 @@ class MainWindow(QMainWindow):
                      lambda: self._toggle_dock(self._dock_fusion), "Ctrl+F")
         self._action(m, "3D Surface View",
                      lambda: self._toggle_dock(self._dock_3d),    "Ctrl+3")
-        self._action(m, "Image Comparison",
-                     lambda: self._toggle_dock(self._dock_compare), "Ctrl+M")
+        self._action(m, "Image Comparison  (floating window)",
+                     self._open_comparison_window, "Ctrl+M")
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
         a = QAction(label, self)
@@ -499,6 +501,36 @@ class MainWindow(QMainWindow):
         self.browser.set_folder(folder)
         if self.folder_images:
             self.open_image(self.folder_images[0])
+
+    def _open_comparison_window(self):
+        """Open comparison as a large floating window — doesn't shrink main viewer."""
+        self._dock_compare.setFloating(True)
+        self._dock_compare.setVisible(True)
+        screen = self.screen().geometry()
+        w = min(1400, int(screen.width() * 0.88))
+        h = min(900,  int(screen.height() * 0.82))
+        x = (screen.width()  - w) // 2
+        y = (screen.height() - h) // 2
+        self._dock_compare.setGeometry(x, y, w, h)
+        self._dock_compare.raise_()
+
+    def _toggle_all_panels(self):
+        """Tab — hide all panels for full image view. Tab again — restore all."""
+        any_visible = any(d.isVisible() for d in self._docks.values())
+        if any_visible:
+            # Save which docks were visible, then hide all
+            self._panels_hidden_state = {k: d.isVisible() for k, d in self._docks.items()}
+            for dock in self._docks.values():
+                dock.setVisible(False)
+            self._status_main.setText(
+                "  Full image view  —  Press Tab to restore panels"
+            )
+        else:
+            # Restore previous visibility
+            state = getattr(self, "_panels_hidden_state", {})
+            for name, dock in self._docks.items():
+                dock.setVisible(state.get(name, True))
+            self._status_main.setText("")
 
     def _reset_layout(self):
         """Restore all docks to default positions and sizes."""

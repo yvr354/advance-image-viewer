@@ -70,6 +70,10 @@ class GLImageViewer(QOpenGLWidget):
         self._grid_threshold:  float = 8.0
         self._syncing:         bool  = False
 
+        # Throttle pixel hover — only emit when image coordinate changes
+        self._last_hover_ix:   int   = -1
+        self._last_hover_iy:   int   = -1
+
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(400, 300)
@@ -326,7 +330,11 @@ class GLImageViewer(QOpenGLWidget):
             ix, iy = self.pixel_at(int(event.position().x()), int(event.position().y()))
             h, w = self._image.shape[:2]
             if 0 <= ix < w and 0 <= iy < h:
-                self.pixel_hovered.emit(ix, iy, self._image[iy, ix])
+                # Only emit when pixel coordinate changes — avoids inspector repaints during pan
+                if ix != self._last_hover_ix or iy != self._last_hover_iy:
+                    self._last_hover_ix = ix
+                    self._last_hover_iy = iy
+                    self.pixel_hovered.emit(ix, iy, self._image[iy, ix])
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
