@@ -8,7 +8,13 @@
       "Bash(git branch *)",
       "Bash(git remote *)",
       "Bash(git push *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(python -m venv venv)",
+      "Bash(venv/Scripts/pip install *)",
+      "Bash(venv/Scripts/python.exe -m pip install PyQt6 opencv-python numpy scipy tifffile imageio pyqtgraph Pillow PyOpenGL PyOpenGL_accelerate)",
+      "Bash(venv/Scripts/python.exe -c \"import PyQt6; import cv2; import numpy; import pyqtgraph; import OpenGL; print\\('All imports OK'\\)\")",
+      "Bash(venv/Scripts/python.exe -m pip install \"PyQt6==6.7.1\" \"PyQt6-Qt6==6.7.1\" \"PyQt6-sip==13.8.0\" --force-reinstall)",
+      "Bash(venv/Scripts/python.exe -c ' *)"
     ]
   }
 }
