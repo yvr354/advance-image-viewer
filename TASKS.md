@@ -1,6 +1,6 @@
 # VyuhaAI Image Viewer — Task Tracker
 
-Last updated: 2026-04-30
+Last updated: 2026-04-30 (updated)
 
 ---
 
@@ -24,6 +24,10 @@ Last updated: 2026-04-30
 | 14 | VyuhaAI branding — logo, name, installer script | ✅ Done |
 | 15 | Dependencies installed — all 29 filters verified loading | ✅ Done |
 | 16 | GitHub committed and pushed | ✅ Done |
+| 17 | Wire OpenGL viewer into main window | ✅ Done |
+| 18 | Wire 3D surface panel as dock in main window | ✅ Done |
+| 19 | Connect all signals — pixel hover, pipeline change, image load → all panels update | ✅ Done |
+| 20 | Image comparison panel — load multiple images, rank by quality score | ✅ Done |
 
 ---
 
@@ -31,10 +35,6 @@ Last updated: 2026-04-30
 
 | # | Task | Status |
 |---|------|--------|
-| 17 | Wire OpenGL viewer into main window | ⬜ Pending |
-| 18 | Wire 3D surface panel as dock in main window | ⬜ Pending |
-| 19 | Connect all signals — pixel hover, pipeline change, image load → all panels update | ⬜ Pending |
-| 20 | Image comparison panel — load multiple images, rank by quality score | ⬜ Pending |
 | 21 | Annotation tools — ROI, line measurement, point marker, defect tag | ⬜ Pending |
 | 22 | Basler live view — pypylon camera integration | ⬜ Pending |
 | 23 | Batch processing — apply pipeline to entire folder, export results | ⬜ Pending |

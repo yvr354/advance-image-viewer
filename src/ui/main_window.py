@@ -30,12 +30,13 @@ from src.analysis.focus_engine import FocusEngine
 from src.analysis.quality_engine import QualityEngine
 from src.pipeline.pipeline import Pipeline
 
-from src.ui.panels.gl_viewer       import GLImageViewer
-from src.ui.panels.inspector_panel import InspectorPanel
-from src.ui.panels.pipeline_panel  import PipelinePanel
-from src.ui.panels.browser_panel   import BrowserPanel
-from src.ui.panels.fusion_panel    import FusionPanel
+from src.ui.panels.gl_viewer        import GLImageViewer
+from src.ui.panels.inspector_panel  import InspectorPanel
+from src.ui.panels.pipeline_panel   import PipelinePanel
+from src.ui.panels.browser_panel    import BrowserPanel
+from src.ui.panels.fusion_panel     import FusionPanel
 from src.ui.panels.surface_3d_panel import Surface3DPanel
+from src.ui.panels.comparison_panel import ComparisonPanel
 from src.ui.theme import VERDICT_COLOR, COLOR_PERFECT, COLOR_WARN, COLOR_FAIL
 
 
@@ -132,13 +133,21 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self._dock_inspector, self._dock_3d)
         self._dock_inspector.raise_()   # Inspector on top by default
 
-        # ── Fusion dock (bottom, hidden by default) ────────────────
+        # ── Fusion dock (bottom, tabbed with pipeline) ────────────────
         self.fusion_panel = FusionPanel()
         self._dock_fusion = self._make_dock(
             "⊕  Illumination Fusion", self.fusion_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
         )
         self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
+
+        # ── Comparison dock (bottom, tabbed with pipeline) ─────────
+        self.comparison_panel = ComparisonPanel()
+        self._dock_compare = self._make_dock(
+            "⊞  Image Comparison", self.comparison_panel,
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+        )
+        self.tabifyDockWidget(self._dock_pipeline, self._dock_compare)
         self._dock_pipeline.raise_()
 
         # ── Status bar ─────────────────────────────────────────────
@@ -150,6 +159,7 @@ class MainWindow(QMainWindow):
             "3D Surface View":    self._dock_3d,
             "Processing Pipeline":self._dock_pipeline,
             "Illumination Fusion":self._dock_fusion,
+            "Image Comparison":   self._dock_compare,
             "File Browser":       self._dock_browser,
         }
 
@@ -208,6 +218,9 @@ class MainWindow(QMainWindow):
         # Fusion → send composite to viewer
         self.fusion_panel.composite_ready.connect(self._on_composite_ready)
 
+        # Comparison panel → open image in main viewer
+        self.comparison_panel.open_image_requested.connect(self.open_image)
+
     # ═══════════════════════════════════════════════════════════════
     #  Menu
     # ═══════════════════════════════════════════════════════════════
@@ -219,6 +232,8 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&File")
         self._action(m, "Open Image…",     self._menu_open_image,  "Ctrl+O")
         self._action(m, "Open Folder…",    self._menu_open_folder, "Ctrl+Shift+O")
+        m.addSeparator()
+        self._action(m, "Add to Comparison", self._add_to_comparison, "Ctrl+Shift+C")
         m.addSeparator()
         self._action(m, "Save Processed Image…", self._menu_save,  "Ctrl+S")
         m.addSeparator()
@@ -257,6 +272,8 @@ class MainWindow(QMainWindow):
                      lambda: self._toggle_dock(self._dock_fusion), "Ctrl+F")
         self._action(m, "3D Surface View",
                      lambda: self._toggle_dock(self._dock_3d),    "Ctrl+3")
+        self._action(m, "Image Comparison",
+                     lambda: self._toggle_dock(self._dock_compare), "Ctrl+M")
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
         a = QAction(label, self)
@@ -476,6 +493,12 @@ class MainWindow(QMainWindow):
         self.browser.set_folder(folder)
         if self.folder_images:
             self.open_image(self.folder_images[0])
+
+    def _add_to_comparison(self):
+        if self.current_image.path:
+            self._dock_compare.setVisible(True)
+            self._dock_compare.raise_()
+            self.comparison_panel.add_image_from_path(self.current_image.path)
 
     def _menu_save(self):
         if self.current_image.display is None:
