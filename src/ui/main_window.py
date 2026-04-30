@@ -254,6 +254,8 @@ class MainWindow(QMainWindow):
         self._action(m, "Toggle Focus Heatmap",  self.viewer.toggle_heatmap, "F")
         self._action(m, "Toggle Histogram",      self.inspector.toggle_histogram, "H")
         m.addSeparator()
+        self._action(m, "Reset Default Layout",  self._reset_layout, "Ctrl+Shift+R")
+        m.addSeparator()
         for name, dock in self._docks.items():
             m.addAction(dock.toggleViewAction())
 
@@ -497,6 +499,34 @@ class MainWindow(QMainWindow):
         self.browser.set_folder(folder)
         if self.folder_images:
             self.open_image(self.folder_images[0])
+
+    def _reset_layout(self):
+        """Restore all docks to default positions and sizes."""
+        # Make all docks visible first
+        for dock in self._docks.values():
+            dock.setVisible(True)
+            dock.setFloating(False)
+
+        # Re-attach docks to their correct areas
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,   self._dock_browser)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,  self._dock_inspector)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,  self._dock_3d)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_pipeline)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_fusion)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_compare)
+
+        # Re-tab right docks and bottom docks
+        self.tabifyDockWidget(self._dock_inspector, self._dock_3d)
+        self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
+        self.tabifyDockWidget(self._dock_pipeline, self._dock_compare)
+
+        # Raise default tabs
+        self._dock_inspector.raise_()
+        self._dock_pipeline.raise_()
+
+        # Re-apply sizes after Qt processes the layout
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(50, self._set_dock_sizes)
 
     def _add_to_comparison(self):
         if self.current_image.path:
