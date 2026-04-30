@@ -141,11 +141,12 @@ class MainWindow(QMainWindow):
         )
         self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
 
-        # ── Comparison dock (bottom, tabbed with pipeline) ─────────
+        # ── Comparison dock (floatable — opens as window via Ctrl+M) ─
         self.comparison_panel = ComparisonPanel()
         self._dock_compare = self._make_dock(
             "⊞  Image Comparison", self.comparison_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
+            floatable=True,
         )
         self.tabifyDockWidget(self._dock_pipeline, self._dock_compare)
         self._dock_pipeline.raise_()
@@ -168,7 +169,8 @@ class MainWindow(QMainWindow):
         }
 
     def _make_dock(self, title: str, widget: QWidget,
-                   area: Qt.DockWidgetArea) -> QDockWidget:
+                   area: Qt.DockWidgetArea,
+                   floatable: bool = False) -> QDockWidget:
         dock = QDockWidget(title, self)
         dock.setWidget(widget)
         dock.setAllowedAreas(
@@ -177,6 +179,12 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.BottomDockWidgetArea |
             Qt.DockWidgetArea.TopDockWidgetArea
         )
+        # Prevent accidental floating — docks stay inside the main window
+        features = QDockWidget.DockWidgetFeature.DockWidgetMovable | \
+                   QDockWidget.DockWidgetFeature.DockWidgetClosable
+        if floatable:
+            features |= QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        dock.setFeatures(features)
         self.addDockWidget(area, dock)
         return dock
 
