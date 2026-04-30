@@ -66,9 +66,13 @@ class GLImageViewer(QOpenGLWidget):
 
         self._show_heatmap:    bool  = False
         self._show_pixel_grid: bool  = True
-        self._heatmap_opacity: float = 0.45
+        self._heatmap_opacity: float = 0.30
         self._grid_threshold:  float = 8.0
         self._syncing:         bool  = False
+
+        # Focus grid overlay
+        self._focus_grid       = None   # FocusGridData or None
+        self._show_focus_grid: bool = False
 
         # Throttle pixel hover — only emit when image coordinate changes
         self._last_hover_ix:   int   = -1
@@ -103,10 +107,22 @@ class GLImageViewer(QOpenGLWidget):
 
     def toggle_heatmap(self):
         self._show_heatmap = not self._show_heatmap
+        # Grid and heatmap are mutually exclusive — both at once = unreadable
+        if self._show_heatmap:
+            self._show_focus_grid = False
         self.update()
 
     def set_heatmap_visible(self, visible: bool):
         self._show_heatmap = visible
+        self.update()
+
+    def set_focus_grid(self, grid_data):
+        """Set rich focus grid data. Pass None to clear."""
+        self._focus_grid = grid_data
+        self.update()
+
+    def set_focus_grid_visible(self, visible: bool):
+        self._show_focus_grid = visible
         self.update()
 
     def fit_to_window(self):
@@ -170,6 +186,9 @@ class GLImageViewer(QOpenGLWidget):
 
         if self._show_heatmap and self._tex_heatmap != 0:
             self._draw_texture(self._tex_heatmap, opacity=self._heatmap_opacity)
+
+        if self._show_focus_grid and self._focus_grid is not None:
+            self._draw_focus_grid_gl()
 
         if self._zoom >= self._grid_threshold and self._show_pixel_grid:
             self._draw_pixel_grid()
@@ -239,6 +258,147 @@ class GLImageViewer(QOpenGLWidget):
 
         glEnable(GL_TEXTURE_2D)
 
+    def _draw_focus_grid_gl(self):
+        """
+        Focus grid — clear industrial design.
+        Each cell: vivid colored fill (semi-transparent) + solid bright border.
+        Image stays readable through the fill. Text drawn in paintEvent.
+        """
+        g = self._focus_grid
+        R, C    = g.rows, g.cols
+        ox, oy  = self._offset.x(), self._offset.y()
+        zoom    = self._zoom
+        cell_sw = g.img_w * zoom / C
+        cell_sh = g.img_h * zoom / R
+
+        glDisable(GL_TEXTURE_2D)
+
+        for r in range(R):
+            for c in range(C):
+                score    = float(g.scores[r, c])
+                is_best  = (r, c) == g.best_cell
+                is_worst = (r, c) == g.worst_cell
+
+                sx0 = ox + c       * cell_sw
+                sy0 = oy + r       * cell_sh
+                sx1 = ox + (c + 1) * cell_sw
+                sy1 = oy + (r + 1) * cell_sh
+
+                # Vivid colors — saturated so clearly visible
+                if is_best:
+                    fr, fg_, fb = 0.0,  1.0,  0.35    # pure green
+                elif is_worst:
+                    fr, fg_, fb = 1.0,  0.08, 0.08    # pure red
+                elif score >= 72:
+                    fr, fg_, fb = 0.0,  0.90, 0.30    # green
+                elif score >= 38:
+                    fr, fg_, fb = 1.0,  0.72, 0.0     # amber/orange
+                else:
+                    fr, fg_, fb = 0.95, 0.10, 0.10    # red
+
+                # Fill: BEST/WORST get stronger fill, others lighter
+                fill_alpha = 0.45 if (is_best or is_worst) else 0.28
+                glColor4f(fr, fg_, fb, fill_alpha)
+                glBegin(GL_QUADS)
+                glVertex2f(sx0, sy0); glVertex2f(sx1, sy0)
+                glVertex2f(sx1, sy1); glVertex2f(sx0, sy1)
+                glEnd()
+
+                # Border: bright solid line
+                lw = 3.0 if (is_best or is_worst) else 1.5
+                glLineWidth(lw)
+                glColor4f(fr, fg_, fb, 1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(sx0, sy0); glVertex2f(sx1, sy0)
+                glVertex2f(sx1, sy1); glVertex2f(sx0, sy1)
+                glEnd()
+
+        glLineWidth(1.0)
+        glEnable(GL_TEXTURE_2D)
+
+    def paintEvent(self, event):
+        """GL render, then QPainter draws score numbers with dark outline — always readable."""
+        super().paintEvent(event)
+
+        if not (self._show_focus_grid and self._focus_grid is not None
+                and self._img_w > 0):
+            return
+
+        g = self._focus_grid
+        R, C    = g.rows, g.cols
+        ox, oy  = self._offset.x(), self._offset.y()
+        zoom    = self._zoom
+        cell_sw = g.img_w * zoom / C
+        cell_sh = g.img_h * zoom / R
+
+        if cell_sw < 30 or cell_sh < 20:
+            return   # cells too small — skip text
+
+        from PyQt6.QtCore import QRectF, Qt as _Qt
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+        # Font: large enough to fill the cell
+        font_size = max(9, min(22, int(cell_sh * 0.38)))
+        font_bold = QFont("Segoe UI", font_size, QFont.Weight.Bold)
+        font_small = QFont("Segoe UI", max(7, font_size - 3), QFont.Weight.Bold)
+
+        for r in range(R):
+            for c in range(C):
+                score    = float(g.scores[r, c])
+                is_best  = (r, c) == g.best_cell
+                is_worst = (r, c) == g.worst_cell
+
+                sx0 = ox + c * cell_sw
+                sy0 = oy + r * cell_sh
+                cell_rect = QRectF(sx0, sy0, cell_sw, cell_sh)
+
+                # Text color
+                if is_best:
+                    txt_color = QColor(220, 255, 220)
+                elif is_worst:
+                    txt_color = QColor(255, 210, 210)
+                elif score >= 72:
+                    txt_color = QColor(200, 255, 200)
+                elif score >= 38:
+                    txt_color = QColor(255, 240, 160)
+                else:
+                    txt_color = QColor(255, 200, 200)
+
+                # Draw score with dark outline so it reads on any background
+                score_str = f"{score:.0f}"
+                painter.setFont(font_bold)
+
+                # Dark outline (draw text 4 times offset)
+                painter.setPen(QColor(0, 0, 0, 200))
+                for dx, dy in [(-1,-1),(1,-1),(-1,1),(1,1)]:
+                    shifted = QRectF(sx0+dx, sy0+dy+cell_sh*0.15, cell_sw, cell_sh*0.55)
+                    painter.drawText(shifted, _Qt.AlignmentFlag.AlignCenter, score_str)
+
+                # Main colored text
+                painter.setPen(txt_color)
+                score_rect = QRectF(sx0, sy0 + cell_sh * 0.15, cell_sw, cell_sh * 0.55)
+                painter.drawText(score_rect, _Qt.AlignmentFlag.AlignCenter, score_str)
+
+                # BEST / WORST label below the number
+                if is_best or is_worst:
+                    painter.setFont(font_small)
+                    label = "◆ BEST" if is_best else "◆ WORST"
+                    lcolor = QColor(180, 255, 180) if is_best else QColor(255, 180, 180)
+
+                    painter.setPen(QColor(0, 0, 0, 180))
+                    for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+                        lr = QRectF(sx0+dx, sy0+dy+cell_sh*0.62, cell_sw, cell_sh*0.32)
+                        painter.drawText(lr, _Qt.AlignmentFlag.AlignCenter, label)
+
+                    painter.setPen(lcolor)
+                    label_rect = QRectF(sx0, sy0 + cell_sh * 0.62, cell_sw, cell_sh * 0.32)
+                    painter.drawText(label_rect, _Qt.AlignmentFlag.AlignCenter, label)
+
+        painter.end()
+
     def _draw_empty_hint(self):
         painter = QPainter(self)
         painter.setPen(QColor(68, 68, 90))
@@ -283,8 +443,9 @@ class GLImageViewer(QOpenGLWidget):
         glBindTexture(GL_TEXTURE_2D, self._tex_heatmap)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        # GL_NEAREST = sharp cell boundaries (no blurry interpolation between cells)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
 
         h, w = heatmap_rgb.shape[:2]
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0,
