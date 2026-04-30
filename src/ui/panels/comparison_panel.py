@@ -28,10 +28,17 @@ from PyQt6.QtWidgets import (
     QFileDialog, QComboBox, QCheckBox, QSizePolicy,
     QSplitter, QGroupBox, QProgressBar,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QImage, QFont, QColor
 
+try:
+    from skimage.metrics import structural_similarity, peak_signal_noise_ratio
+    _SKIMAGE = True
+except ImportError:
+    _SKIMAGE = False
+
 from src.core.image_loader import load_image, is_supported
+from src.ui.panels.gl_viewer import GLImageViewer
 from src.analysis.focus_engine import FocusEngine
 from src.analysis.quality_engine import QualityEngine
 from src.ui.theme import (
@@ -246,12 +253,26 @@ class ImageCard(QFrame):
 # ── Side-by-side comparison view ──────────────────────────────────────────
 
 class CompareView(QWidget):
-    """Shows two images side by side with difference option."""
+    """
+    Professional side-by-side comparison using two synchronized GL viewers.
+
+    Controls (in each viewer):
+      Left drag    — pan
+      Scroll wheel — zoom toward cursor
+      Right drag   — rubber-band zoom to region
+      Double-click — fit to window
+
+    Sync Zoom: when checked, zooming/panning one viewer mirrors the other
+    at the exact same image position — essential for comparing same-scene images.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._image_a: np.ndarray | None = None
         self._image_b: np.ndarray | None = None
+        self._flicker_state = False
+        self._flicker_timer = QTimer()
+        self._flicker_timer.timeout.connect(self._flicker_tick)
         self._build()
 
     def _build(self):
@@ -259,15 +280,29 @@ class CompareView(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        # Toolbar
+        # ── Toolbar ────────────────────────────────────────────────
         toolbar = QHBoxLayout()
+
         self._mode = QComboBox()
         self._mode.addItems(["Side by Side", "Difference (A−B)", "Overlay Blend", "Flicker"])
-        self._mode.currentTextChanged.connect(self._update)
+        self._mode.setToolTip(
+            "Side by Side  — synchronized GL viewers, same zoom/pan\n"
+            "Difference     — pixel diff amplified 8×, JET colormap\n"
+            "Overlay Blend — 50/50 alpha blend of A and B\n"
+            "Flicker        — alternates A/B every 500ms — eye catches changes"
+        )
+        self._mode.currentTextChanged.connect(self._on_mode_changed)
 
         self._swap_btn = QPushButton("⇄ Swap")
-        self._swap_btn.setFixedWidth(70)
+        self._swap_btn.setFixedWidth(65)
         self._swap_btn.clicked.connect(self._swap)
+
+        self._sync_chk = QCheckBox("Sync Zoom")
+        self._sync_chk.setChecked(True)
+        self._sync_chk.setToolTip(
+            "When enabled: zooming or panning image A automatically mirrors\n"
+            "the same region in image B — compare exact same pixel position."
+        )
 
         self._label_a = QLabel("A: —")
         self._label_b = QLabel("B: —")
@@ -277,32 +312,51 @@ class CompareView(QWidget):
         toolbar.addWidget(QLabel("Mode:"))
         toolbar.addWidget(self._mode)
         toolbar.addWidget(self._swap_btn)
+        toolbar.addWidget(self._sync_chk)
         toolbar.addStretch()
         toolbar.addWidget(self._label_a)
-        toolbar.addWidget(QLabel(" vs "))
+        toolbar.addWidget(QLabel("  vs  "))
         toolbar.addWidget(self._label_b)
         layout.addLayout(toolbar)
 
-        # Display
+        # ── GL Viewers ─────────────────────────────────────────────
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._view_a = QLabel()
-        self._view_b = QLabel()
-        for v in [self._view_a, self._view_b]:
-            v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            v.setStyleSheet("background: #0A0A0F; border-radius: 4px;")
-            v.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._viewer_a = GLImageViewer()
+        self._viewer_b = GLImageViewer()
+        for v in [self._viewer_a, self._viewer_b]:
             v.setMinimumSize(200, 150)
-        self._splitter.addWidget(self._view_a)
-        self._splitter.addWidget(self._view_b)
+
+        self._splitter.addWidget(self._viewer_a)
+        self._splitter.addWidget(self._viewer_b)
         layout.addWidget(self._splitter)
 
-        # Diff metrics bar
-        self._diff_label = QLabel("")
-        self._diff_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._diff_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
-        layout.addWidget(self._diff_label)
+        # Connect sync: a → b and b → a (set_view_state does not re-emit)
+        self._viewer_a.view_state_changed.connect(self._sync_a_to_b)
+        self._viewer_b.view_state_changed.connect(self._sync_b_to_a)
 
-        self.setMinimumHeight(200)
+        # ── Metrics bar ────────────────────────────────────────────
+        self._metrics_label = QLabel("")
+        self._metrics_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._metrics_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 10px; padding: 2px;"
+        )
+        self._metrics_label.setWordWrap(True)
+        layout.addWidget(self._metrics_label)
+
+        self.setMinimumHeight(220)
+
+    # ── Sync ───────────────────────────────────────────────────────
+
+    def _sync_a_to_b(self, zoom, ox, oy):
+        if self._sync_chk.isChecked():
+            self._viewer_b.set_view_state(zoom, ox, oy)
+
+    def _sync_b_to_a(self, zoom, ox, oy):
+        if self._sync_chk.isChecked():
+            self._viewer_a.set_view_state(zoom, ox, oy)
+
+    # ── Public API ─────────────────────────────────────────────────
 
     def set_image_a(self, image: np.ndarray, name: str):
         self._image_a = image
@@ -322,35 +376,55 @@ class CompareView(QWidget):
         self._label_b.setText(a_txt.replace("A:", "B:"))
         self._update()
 
+    # ── Mode handling ──────────────────────────────────────────────
+
+    def _on_mode_changed(self, mode: str):
+        self._flicker_timer.stop()
+        self._update()
+
     def _update(self):
         mode = self._mode.currentText()
         if self._image_a is None and self._image_b is None:
             return
 
         if mode == "Side by Side":
-            self._view_a.setVisible(True)
-            self._view_b.setVisible(True)
+            self._viewer_a.setVisible(True)
+            self._viewer_b.setVisible(True)
             if self._image_a is not None:
-                self._show(self._view_a, self._image_a)
+                self._viewer_a.set_image(self._image_a)
             if self._image_b is not None:
-                self._show(self._view_b, self._image_b)
-            self._diff_label.setText("")
+                self._viewer_b.set_image(self._image_b)
+            self._metrics_label.setText(
+                "Left drag to pan  ·  Scroll wheel to zoom  ·  "
+                "Right drag to zoom to region  ·  Double-click to fit"
+            )
 
         elif mode == "Difference (A−B)":
             if self._image_a is not None and self._image_b is not None:
-                diff = self._compute_diff(self._image_a, self._image_b)
-                self._view_a.setVisible(True)
-                self._view_b.setVisible(True)
-                self._show(self._view_a, self._image_a)
-                self._show(self._view_b, diff)
-                mean_diff = float(np.mean(np.abs(
-                    self._image_a.astype(np.float32) - self._image_b.astype(np.float32)
-                )))
-                self._diff_label.setText(
-                    f"Mean absolute difference: {mean_diff:.2f} / 255   "
-                    f"({mean_diff/255*100:.2f}%)   "
-                    f"{'Images are identical' if mean_diff < 0.5 else 'Images differ'}"
-                )
+                a8 = self._to_8bit(self._image_a)
+                b8 = self._to_8bit(self._image_b)
+                if a8.shape != b8.shape:
+                    b8 = cv2.resize(b8, (a8.shape[1], a8.shape[0]))
+
+                diff_f = np.abs(a8.astype(np.float32) - b8.astype(np.float32))
+                diff8  = np.clip(diff_f * 8, 0, 255).astype(np.uint8)
+                if diff8.ndim == 2:
+                    diff_rgb = cv2.cvtColor(
+                        cv2.applyColorMap(diff8, cv2.COLORMAP_JET),
+                        cv2.COLOR_BGR2RGB
+                    )
+                else:
+                    gray = cv2.cvtColor(diff8, cv2.COLOR_RGB2GRAY)
+                    diff_rgb = cv2.cvtColor(
+                        cv2.applyColorMap(gray, cv2.COLORMAP_JET),
+                        cv2.COLOR_BGR2RGB
+                    )
+
+                self._viewer_a.set_image(a8)
+                self._viewer_b.set_image(diff_rgb)
+                self._viewer_a.setVisible(True)
+                self._viewer_b.setVisible(True)
+                self._show_diff_metrics(a8, b8, diff_f)
 
         elif mode == "Overlay Blend":
             if self._image_a is not None and self._image_b is not None:
@@ -359,36 +433,61 @@ class CompareView(QWidget):
                 if a8.shape != b8.shape:
                     b8 = cv2.resize(b8, (a8.shape[1], a8.shape[0]))
                 blended = cv2.addWeighted(a8, 0.5, b8, 0.5, 0)
-                self._view_a.setVisible(True)
-                self._view_b.setVisible(False)
-                self._show(self._view_a, blended)
+                self._viewer_a.set_image(blended)
+                self._viewer_b.setVisible(False)
+                self._metrics_label.setText("50% A  +  50% B  overlay blend")
 
-    def _compute_diff(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        a8 = self._to_8bit(a).astype(np.float32)
-        b8 = self._to_8bit(b).astype(np.float32)
-        if a8.shape != b8.shape:
-            b8 = cv2.resize(b8, (a8.shape[1], a8.shape[0]))
-        diff = np.abs(a8 - b8)
-        # Amplify 8× so small differences are visible
-        diff = np.clip(diff * 8, 0, 255).astype(np.uint8)
-        if diff.ndim == 2:
-            diff = cv2.applyColorMap(diff, cv2.COLORMAP_JET)
-            diff = cv2.cvtColor(diff, cv2.COLOR_BGR2RGB)
-        return diff
+        elif mode == "Flicker":
+            if self._image_a is not None and self._image_b is not None:
+                self._viewer_b.setVisible(False)
+                self._viewer_a.set_image(self._image_a)
+                self._flicker_timer.start(500)
+                self._metrics_label.setText(
+                    "Flicker mode — alternating A/B every 500ms.  "
+                    "Eye catches any change instantly."
+                )
 
-    def _show(self, label: QLabel, image: np.ndarray):
-        img = self._to_8bit(image)
-        if img.ndim == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        h, w = img.shape[:2]
-        max_w = max(label.width() - 8, 200)
-        max_h = max(label.height() - 8, 150)
-        scale = min(max_w / w, max_h / h, 1.0)
-        if scale < 1.0:
-            img = cv2.resize(img, (int(w * scale), int(h * scale)))
-        qimg = QImage(img.data, img.shape[1], img.shape[0],
-                      img.shape[1]*3, QImage.Format.Format_RGB888)
-        label.setPixmap(QPixmap.fromImage(qimg.copy()))
+    def _flicker_tick(self):
+        if self._image_a is None or self._image_b is None:
+            return
+        self._flicker_state = not self._flicker_state
+        self._viewer_a.set_image(
+            self._image_b if self._flicker_state else self._image_a
+        )
+
+    def _show_diff_metrics(self, a8: np.ndarray, b8: np.ndarray, diff_f: np.ndarray):
+        mae  = float(np.mean(diff_f))
+        pct  = mae / 255 * 100
+
+        parts = [f"MAE: {mae:.2f}/255 ({pct:.2f}%)"]
+
+        if _SKIMAGE:
+            try:
+                win = min(7, min(a8.shape[:2]))
+                if win % 2 == 0:
+                    win -= 1
+                if win >= 3:
+                    ch_axis = 2 if a8.ndim == 3 else None
+                    ssim_v = structural_similarity(
+                        a8, b8, channel_axis=ch_axis, win_size=win, data_range=255
+                    )
+                    psnr_v = peak_signal_noise_ratio(a8, b8, data_range=255)
+                    parts.append(f"PSNR: {psnr_v:.1f} dB")
+                    parts.append(f"SSIM: {ssim_v:.4f}")
+            except Exception:
+                pass
+
+        if a8.ndim == 3:
+            ch_names = ["R", "G", "B"]
+            ch_diffs = [f"{n}:{float(np.mean(np.abs(a8[:,:,i].astype(float)-b8[:,:,i].astype(float)))):.1f}"
+                        for i, n in enumerate(ch_names) if i < a8.shape[2]]
+            parts.append("Per-channel: " + "  ".join(ch_diffs))
+
+        identical = mae < 0.5
+        status = "IDENTICAL" if identical else ("NEAR-IDENTICAL" if mae < 2 else "DIFFERS")
+        parts.append(f"→ {status}")
+
+        self._metrics_label.setText("   |   ".join(parts))
 
     @staticmethod
     def _to_8bit(image: np.ndarray) -> np.ndarray:

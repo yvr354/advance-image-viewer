@@ -20,7 +20,7 @@ cmd = [
     "--noconfirm",
     "--windowed",
     "--name", "VyuhaAI_ImageViewer",
-    "--icon", os.path.join("resources", "icons", "logo.png"),
+    "--icon", os.path.join("resources", "icons", "logo.ico"),
     "--add-data", "resources;resources",
     "--add-data", "src;src",
     "--hidden-import", "PyQt6.QtOpenGL",
@@ -33,6 +33,14 @@ cmd = [
     "--hidden-import", "skimage",
     "--hidden-import", "scipy",
     "--hidden-import", "numpy",
+    "--hidden-import", "imageio.plugins",
+    "--hidden-import", "imageio.plugins.pillow",
+    "--hidden-import", "imageio.plugins.tifffile",
+    "--copy-metadata", "imageio",
+    "--copy-metadata", "tifffile",
+    "--copy-metadata", "pyqtgraph",
+    "--copy-metadata", "numpy",
+    "--copy-metadata", "opencv-python",
     "main.py",
 ]
 
