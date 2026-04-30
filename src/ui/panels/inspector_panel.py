@@ -67,30 +67,97 @@ class InspectorPanel(QScrollArea):
     def _build_focus_group(self):
         box = QGroupBox("Focus & Sharpness")
         layout = QVBoxLayout(box)
-        layout.setSpacing(2)
+        layout.setSpacing(3)
 
+        # Verdict + confidence on same line
+        top_row = QHBoxLayout()
         self._focus_verdict = QLabel("—")
-        self._focus_verdict.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._focus_verdict.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        layout.addWidget(self._focus_verdict)
+        self._focus_confidence = QLabel("")
+        self._focus_confidence.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self._focus_confidence.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top_row.addWidget(self._focus_verdict)
+        top_row.addStretch()
+        top_row.addWidget(self._focus_confidence)
+        layout.addLayout(top_row)
 
         self._focus_score_row = MetricRow("Score")
         layout.addWidget(self._focus_score_row)
 
-        self._focus_metric_label = QLabel("Metric: —")
-        self._focus_metric_label.setStyleSheet("color: gray; font-size: 9px;")
-        layout.addWidget(self._focus_metric_label)
+        # Raw metrics — always shown so expert can verify
+        self._focus_raw_lbl = QLabel("Lap var: —  |  Tenengrad: —  |  Brenner: —")
+        self._focus_raw_lbl.setStyleSheet("color:#555577; font-size:9px; font-family:Consolas;")
+        self._focus_raw_lbl.setWordWrap(True)
+        layout.addWidget(self._focus_raw_lbl)
+
+        # Scoring mode + reference info
+        self._focus_mode_lbl = QLabel("Mode: RELATIVE (no reference)")
+        self._focus_mode_lbl.setStyleSheet("color:#555577; font-size:9px;")
+        self._focus_mode_lbl.setWordWrap(True)
+        layout.addWidget(self._focus_mode_lbl)
 
         self._layout.addWidget(box)
 
-    def update_focus(self, result):
-        color_map = {"PERFECT": "#00e676", "GOOD": "#b2ff59", "SOFT": "#ffab40", "BLURRY": "#ff5252"}
+    def update_focus(self, result, current_filename: str = ""):
+        color_map = {"PERFECT": "#00e676", "GOOD": "#b2ff59",
+                     "SOFT": "#ffab40", "BLURRY": "#ff5252"}
+        conf_color = {"HIGH": "#00e676", "MEDIUM": "#ffab40", "LOW": "#888899"}
+
         color = color_map.get(result.verdict, "white")
         self._focus_verdict.setText(result.verdict)
         self._focus_verdict.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+        conf  = getattr(result, "confidence",   "LOW")
+        mode  = getattr(result, "scoring_mode", "RELATIVE")
+        r_pct = getattr(result, "ref_pct",      0.0)
+        r_src = getattr(result, "ref_source",   "")
+        r_lap = getattr(result, "raw_lap",      0.0)
+        r_ten = getattr(result, "raw_ten",      0.0)
+        r_bre = getattr(result, "raw_brenner",  0.0)
+
+        cc = conf_color.get(conf, "#888899")
+        self._focus_confidence.setText(f"● {conf}")
+        self._focus_confidence.setStyleSheet(f"color:{cc}; font-size:8px; font-weight:bold;")
+
         pct = min(result.score / 10, 100)
         self._focus_score_row.set_value(f"{result.score:.0f}", pct, color)
-        self._focus_metric_label.setText(f"Metric: {result.metric}")
+
+        # Raw numbers — expert can always verify
+        self._focus_raw_lbl.setText(
+            f"Lap: {r_lap:,.0f}  |  Ten: {r_ten:,.0f}  |  Bren: {r_bre:,.1f}"
+        )
+
+        # Detect self-comparison: current image IS the reference — must match by filename,
+        # NOT by score (same image in different format would also score ~100%)
+        is_self_ref = (mode != "RELATIVE" and r_src and current_filename
+                       and current_filename == r_src)
+
+        # Mode label — explicit about what scoring was used
+        if mode == "RELATIVE":
+            self._focus_mode_lbl.setText(
+                "⚠ RELATIVE MODE — normalized to own best cell\n"
+                "   Cannot confirm absolute sharpness. Use reference."
+            )
+            self._focus_mode_lbl.setStyleSheet("color:#886633; font-size:9px;")
+        elif is_self_ref:
+            self._focus_mode_lbl.setText(
+                f"⚠ THIS IMAGE IS THE REFERENCE ({r_src})\n"
+                "   Comparing to itself — 100% is not a real score.\n"
+                "   Trust the absolute Score and Verdict above."
+            )
+            self._focus_mode_lbl.setStyleSheet("color:#CC8800; font-size:9px;")
+        elif mode == "AUTO_REF":
+            self._focus_mode_lbl.setText(
+                f"AUTO-REF ({r_src})\n"
+                f"   This image: {r_pct:.1f}% of session best"
+            )
+            self._focus_mode_lbl.setStyleSheet("color:#6699AA; font-size:9px;")
+        else:  # LOCKED_REF
+            self._focus_mode_lbl.setText(
+                f"✓ LOCKED REF ({r_src})\n"
+                f"   This image: {r_pct:.1f}% of reference"
+            )
+            self._focus_mode_lbl.setStyleSheet("color:#00AA66; font-size:9px;")
 
     # ── Quality ────────────────────────────────────────────────────────────
 
