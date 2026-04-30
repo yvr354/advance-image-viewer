@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
             "⚙  Processing Pipeline", self.pipeline_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
         )
-        self._dock_pipeline.setMinimumHeight(180)
+        self._dock_pipeline.setMinimumHeight(200)
 
         # ── Browser dock (left) ────────────────────────────────────
         self.browser = BrowserPanel()
@@ -149,6 +149,10 @@ class MainWindow(QMainWindow):
         )
         self.tabifyDockWidget(self._dock_pipeline, self._dock_compare)
         self._dock_pipeline.raise_()
+
+        # All bottom docks: enforce minimum height so they can never collapse
+        for dock in [self._dock_pipeline, self._dock_fusion, self._dock_compare]:
+            dock.setMinimumHeight(200)
 
         # ── Status bar ─────────────────────────────────────────────
         self._build_status_bar()
@@ -520,9 +524,34 @@ class MainWindow(QMainWindow):
     # ═══════════════════════════════════════════════════════════════
 
     def _restore_geometry(self):
-        self.resize(self.config.window_width, self.config.window_height)
-        if self.config.window_maximized:
-            self.showMaximized()
+        self.showMaximized()   # always start maximized — full screen layout
+        # Dock sizes set after show so Qt has real pixel dimensions
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self._set_dock_sizes)
+
+    def _set_dock_sizes(self):
+        """Set initial dock proportions after the window is fully shown."""
+        h = self.height()
+        w = self.width()
+        bottom_h = max(260, int(h * 0.28))
+        left_w   = max(200, int(w * 0.14))
+        right_w  = max(260, int(w * 0.18))
+
+        self.resizeDocks(
+            [self._dock_pipeline],
+            [bottom_h],
+            Qt.Orientation.Vertical,
+        )
+        self.resizeDocks(
+            [self._dock_browser],
+            [left_w],
+            Qt.Orientation.Horizontal,
+        )
+        self.resizeDocks(
+            [self._dock_inspector],
+            [right_w],
+            Qt.Orientation.Horizontal,
+        )
 
     def closeEvent(self, event):
         if self._analysis_worker and self._analysis_worker.isRunning():
