@@ -324,7 +324,12 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._action(m, "Add to Comparison", self._add_to_comparison, "Ctrl+Shift+C")
         m.addSeparator()
-        self._action(m, "Save Processed Image…", self._menu_save,  "Ctrl+S")
+        self._action(m, "Save Processed Image…", self._menu_save,       "Ctrl+S")
+        m.addSeparator()
+        self._action(m, "Export Focus Report  (CSV)…",  self._export_csv,  "Ctrl+E")
+        self._action(m, "Export Focus Report  (PDF)…",  self._export_pdf)
+        m.addSeparator()
+        self._action(m, "Batch Analyze Folder…",         self._batch_analyze, "Ctrl+B")
         m.addSeparator()
         self._action(m, "Exit",            self.close,             "Alt+F4")
 
@@ -337,6 +342,7 @@ class MainWindow(QMainWindow):
         self._action(m, "50% Zoom",        lambda: self.viewer.set_zoom(0.5),  "5")
         m.addSeparator()
         self._action(m, "Toggle Focus Heatmap",  self.viewer.toggle_heatmap, "F")
+        self._action(m, "Toggle Focus Grid",     self._toggle_focus_grid,    "G")
         self._action(m, "Toggle Histogram",      self.inspector.toggle_histogram, "H")
         m.addSeparator()
         self._action(m, "Full Image View  (hide all panels)",
@@ -414,9 +420,18 @@ class MainWindow(QMainWindow):
                 self._dock_focus.raise_()
                 self._refresh_focus_assist()
 
-        self.viewer.set_heatmap_visible(mode == "Focus")
+        # Focus mode: grid on, heatmap off by default (F toggles heatmap, G toggles grid)
         if mode == "Focus":
-            self._mode_banner.setText("FOCUS MODE - heatmap overlay active, tune lens/camera until important regions turn green")
+            self.viewer.set_focus_grid_visible(True)
+            self.viewer.set_heatmap_visible(False)
+        else:
+            self.viewer.set_focus_grid_visible(False)
+            self.viewer.set_heatmap_visible(False)
+        if mode == "Focus":
+            self._mode_banner.setText(
+                "FOCUS MODE  —  Grid shows per-cell sharpness (0–100 relative)  "
+                "·  GREEN=sharp  AMBER=soft  RED=blurry  ·  Press G to toggle grid"
+            )
             self._mode_banner.setVisible(True)
         elif mode == "Inspect":
             self._mode_banner.setText("")
@@ -532,9 +547,10 @@ class MainWindow(QMainWindow):
         self.inspector.update_focus(focus_result)
         self.inspector.update_quality(quality_result)
 
-        # Viewer: focus heatmap overlay
+        # Viewer: focus heatmap + grid overlay
         heatmap_rgb = self.focus_engine.heatmap_to_rgb(focus_result.heatmap)
         self.viewer.set_heatmap(heatmap_rgb)
+        self.viewer.set_focus_grid(focus_result.grid)
 
         # Status bar: color-coded verdict
         self._update_status_verdict(focus_result, quality_result)
@@ -587,6 +603,13 @@ class MainWindow(QMainWindow):
             return f"Image {self.folder_index + 1} / {len(self.folder_images)}"
         return ""
 
+    def _toggle_focus_grid(self):
+        self.viewer._show_focus_grid = not self.viewer._show_focus_grid
+        # When grid turns on, turn heatmap off — they shouldn't overlap
+        if self.viewer._show_focus_grid:
+            self.viewer._show_heatmap = False
+        self.viewer.update()
+
     def _refresh_focus_assist(self):
         if self._last_focus_result is not None and self._last_quality_result is not None:
             self._update_focus_assist(self._last_focus_result, self._last_quality_result)
@@ -612,54 +635,73 @@ class MainWindow(QMainWindow):
         )
 
     def _update_focus_assist(self, focus_result, quality_result):
-        verdict = focus_result.verdict
-        score = focus_result.score
-        quality = quality_result.overall_score
+        v  = focus_result.verdict
+        g  = focus_result.grid
+        q  = quality_result.overall_score
 
-        if verdict in {"PERFECT", "GOOD"}:
+        # Grid statistics block
+        grid_block = (
+            f"GRID ANALYSIS  ({g.rows}×{g.cols} = {g.rows*g.cols} cells)\n"
+            f"  SHARP  (≥72%)  :  {g.pct_sharp:.0f}% of cells\n"
+            f"  SOFT   (38-72%):  {g.pct_soft:.0f}% of cells\n"
+            f"  BLURRY (<38%)  :  {g.pct_blurry:.0f}% of cells\n"
+            f"  Best  cell : row {g.best_cell[0]+1}, col {g.best_cell[1]+1}  "
+            f"({g.scores[g.best_cell]:.0f}%)\n"
+            f"  Worst cell : row {g.worst_cell[0]+1}, col {g.worst_cell[1]+1}  "
+            f"({g.scores[g.worst_cell]:.0f}%)"
+        )
+
+        # Tilt warning
+        tilt_block = ""
+        if g.tilt_warn:
+            tilt_block = f"\n\nTILT DETECTED\n{g.tilt_warn}\nAdjust part fixture or camera angle."
+
+        # Verdict action
+        if v in {"PERFECT", "GOOD"}:
             action = (
                 "ACTION\n"
-                "Focus is usable for inspection. If this is a production reference, "
-                "lock lens/camera settings and compare against other captures."
+                "Focus is usable. Lock lens settings.\n"
+                "Use this as reference for comparison captures."
             )
-        elif verdict == "SOFT":
+        elif v == "SOFT":
             action = (
                 "ACTION\n"
-                "Image is soft. Re-tune lens focus, reduce motion/vibration, "
-                "or select ROI around the actual product area before accepting."
+                "Image is soft. Re-tune lens focus ring,\n"
+                "reduce exposure time or vibration,\n"
+                "or move camera closer to the sharp region."
             )
         else:
             action = (
                 "ACTION\n"
-                "Image is blurry for focus-critical inspection. Do not use as "
-                "training/reference image until lens, exposure time, lighting, "
-                "or camera stability is improved."
+                "Blurry — DO NOT use for defect inspection.\n"
+                "Fix lens focus, increase lighting, reduce\n"
+                "motion blur before accepting this image."
             )
 
+        # Quality conflict
         conflict = ""
-        if verdict in {"SOFT", "BLURRY"} and quality_result.verdict == "PASS":
+        if v in {"SOFT", "BLURRY"} and quality_result.verdict == "PASS":
             conflict = (
-                "\n\nIMPORTANT CONFLICT\n"
-                "Quality says PASS, but focus says weak. This means exposure/noise/"
-                "contrast look acceptable, but sharpness is not good enough. "
-                "For AI/defect inspection, trust focus for edge/scratch/detail work."
+                "\n\nCONFLICT: Quality=PASS but Focus=WEAK\n"
+                "Exposure/contrast look OK but sharpness\n"
+                "is insufficient for edge/scratch detection.\n"
+                "For AI defect models — trust focus score."
             )
-
-        heatmap_note = (
-            "\n\nHEATMAP\n"
-            "Green = locally sharper. Red/orange = weak focus or low detail. "
-            "Use the map to find whether the whole part is soft or only one region."
-        )
 
         self._focus_assist.setText(
-            "FOCUS ASSIST\n\n"
-            f"Verdict: {verdict}\n"
-            f"Focus score: {score:.0f}\n"
-            f"Metric: {focus_result.metric}\n"
-            f"Quality score: {quality:.0f}/100 ({quality_result.verdict})\n\n"
+            f"FOCUS ASSIST\n\n"
+            f"Verdict : {v}\n"
+            f"Score   : {focus_result.score:.0f}  (Laplacian+Tenengrad fusion)\n"
+            f"Quality : {q:.0f}/100  ({quality_result.verdict})\n\n"
+            f"{grid_block}"
+            f"{tilt_block}\n\n"
             f"{action}"
-            f"{conflict}"
-            f"{heatmap_note}"
+            f"{conflict}\n\n"
+            f"GRID KEY\n"
+            f"GREEN  = SHARP (≥72%)  — good for inspection\n"
+            f"AMBER  = SOFT  (38-72%) — marginal\n"
+            f"RED    = BLURRY (<38%) — reject / refocus\n"
+            f"[G] toggle grid  [F] toggle heatmap"
         )
 
     # ═══════════════════════════════════════════════════════════════
@@ -791,6 +833,48 @@ class MainWindow(QMainWindow):
         if self.current_image.path:
             self.comparison_panel.add_image_from_path(self.current_image.path)
             self._set_mode("Compare")
+
+    def _export_csv(self):
+        if not self.current_image.is_loaded() or self._last_focus_result is None:
+            QMessageBox.information(self, "Export",
+                "Open an image and wait for analysis to complete first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export CSV Report", "", "CSV (*.csv)")
+        if not path:
+            return
+        from src.export.report_exporter import ImageRecord, export_csv
+        record = ImageRecord.from_analysis(
+            self.current_image, self._last_focus_result, self._last_quality_result)
+        export_csv([record], path)
+        self._status_main.setText(f"  CSV exported: {path}")
+        QMessageBox.information(self, "Exported",
+            f"CSV report saved to:\n{path}\n\n"
+            f"Decision: {record.overall_decision()}\n"
+            f"Focus: {record.focus_verdict}  |  "
+            f"Sharp: {record.pct_sharp:.0f}%  Soft: {record.pct_soft:.0f}%  "
+            f"Blurry: {record.pct_blurry:.0f}%")
+
+    def _export_pdf(self):
+        if not self.current_image.is_loaded() or self._last_focus_result is None:
+            QMessageBox.information(self, "Export",
+                "Open an image and wait for analysis to complete first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PDF Report", "", "PDF (*.pdf);;HTML (*.html)")
+        if not path:
+            return
+        from src.export.report_exporter import ImageRecord, export_pdf
+        record = ImageRecord.from_analysis(
+            self.current_image, self._last_focus_result, self._last_quality_result)
+        result = export_pdf([record], path)
+        self._status_main.setText(f"  Report saved: {result}")
+        QMessageBox.information(self, "Exported", f"Report saved to:\n{result}")
+
+    def _batch_analyze(self):
+        from src.ui.dialogs.batch_dialog import BatchDialog
+        dlg = BatchDialog(self, self.focus_engine, self.quality_engine)
+        dlg.exec()
 
     def _menu_save(self):
         if self.current_image.display is None:
