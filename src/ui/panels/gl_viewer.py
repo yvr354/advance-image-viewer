@@ -68,6 +68,8 @@ class GLImageViewer(QOpenGLWidget):
     line_profile_drawn = pyqtSignal(int, int, int, int)   # ix1,iy1,ix2,iy2
     annotation_placed  = pyqtSignal(int, int)             # ix, iy
     measure_done       = pyqtSignal(int, int, int, int)   # ix1,iy1,ix2,iy2
+    mask_polygon_added = pyqtSignal(list)                 # list of [x,y] image-px pairs
+    mask_cleared       = pyqtSignal()                     # all polygons removed
 
     def __init__(self, parent=None):
         fmt = QSurfaceFormat()
@@ -117,6 +119,10 @@ class GLImageViewer(QOpenGLWidget):
 
         # mm/px calibration for measurement tool
         self._mm_per_px: float = 0.0   # 0 = not calibrated
+
+        # Mask tool — polygon drawing
+        self._mask_polygons:    list = []    # finalized polygons [[x,y],...] image-px
+        self._mask_current_pts: list = []    # QPointFs being drawn (screen coords)
 
         # Throttle pixel hover — only emit when image coordinate changes
         self._last_hover_ix: int = -1
@@ -176,8 +182,9 @@ class GLImageViewer(QOpenGLWidget):
         self._tdrag_now   = None
         if tool == "navigate":
             self.setCursor(Qt.CursorShape.ArrowCursor)
-        elif tool == "annotate":
+        elif tool == "mask":
             self.setCursor(Qt.CursorShape.CrossCursor)
+            self._mask_current_pts = []   # reset any in-progress polygon
         else:
             self.setCursor(Qt.CursorShape.CrossCursor)
         self.update()
@@ -186,8 +193,22 @@ class GLImageViewer(QOpenGLWidget):
         self._mm_per_px = mm_per_px
         self.update()
 
+    def set_mask_polygons(self, polygons: list):
+        """Load pre-existing mask polygons (image pixel coords) for display."""
+        self._mask_polygons = [list(p) for p in polygons]
+        self.update()
+
+    def get_mask_polygons(self) -> list:
+        return list(self._mask_polygons)
+
+    def clear_mask(self):
+        self._mask_polygons    = []
+        self._mask_current_pts = []
+        self.mask_cleared.emit()
+        self.update()
+
     def clear_tool_overlays(self):
-        """Remove ROI, profile line, and measure line."""
+        """Remove ROI, profile line, and measure line (keeps mask)."""
         self._roi_img     = None
         self._profile_img = None
         self._measure_img = None
@@ -300,6 +321,7 @@ class GLImageViewer(QOpenGLWidget):
         if self._img_w > 0:
             if self._show_focus_grid and self._focus_grid is not None:
                 self._paint_focus_grid_labels(painter)
+            self._paint_mask_overlay(painter)
             self._paint_roi_overlay(painter)
             self._paint_profile_overlay(painter)
             self._paint_measure_overlay(painter)
@@ -438,6 +460,21 @@ class GLImageViewer(QOpenGLWidget):
         if cell_sw < 30 or cell_sh < 20:
             return
 
+        # Scoring mode badge — top-left corner of grid
+        mode = getattr(g, "scoring_mode", "RELATIVE")
+        badge_color = {"RELATIVE": QColor("#886633"),
+                       "AUTO_REF": QColor("#336699"),
+                       "LOCKED_REF": QColor("#007744")}.get(mode, QColor("#886633"))
+        badge_text  = {"RELATIVE": "⚠ RELATIVE",
+                       "AUTO_REF": "AUTO-REF",
+                       "LOCKED_REF": "✓ LOCKED REF"}.get(mode, "RELATIVE")
+        bfont = QFont("Segoe UI", max(7, int(cell_sh * 0.18)), QFont.Weight.Bold)
+        painter.setFont(bfont)
+        painter.setPen(QColor(0, 0, 0, 160))
+        painter.drawText(QPointF(self._offset.x() + 3, self._offset.y() + 14), badge_text)
+        painter.setPen(badge_color)
+        painter.drawText(QPointF(self._offset.x() + 2, self._offset.y() + 13), badge_text)
+
         from PyQt6.QtCore import QRectF, Qt as _Qt
 
         font_size  = max(9, min(22, int(cell_sh * 0.38)))
@@ -489,6 +526,81 @@ class GLImageViewer(QOpenGLWidget):
                     painter.setPen(lcolor)
                     painter.drawText(QRectF(sx0, sy0+cell_sh*0.62, cell_sw, cell_sh*0.32),
                                      _Qt.AlignmentFlag.AlignCenter, label)
+
+    def _paint_mask_overlay(self, painter: QPainter):
+        """
+        Draw inspection mask:
+          - Excluded region (outside polygons): dark semi-transparent overlay
+          - Polygon outlines: bright green
+          - In-progress polygon: dashed green with vertex dots
+        """
+        from PyQt6.QtGui import QPainterPath, QPolygonF
+        from PyQt6.QtCore import QRectF
+
+        has_final   = bool(self._mask_polygons)
+        has_current = (self._tool == "mask" and len(self._mask_current_pts) >= 1)
+
+        if not has_final and not has_current:
+            return
+
+        sx0, sy0 = self._img_to_screen(0, 0)
+        sx1, sy1 = self._img_to_screen(self._img_w, self._img_h)
+
+        # ── Excluded region overlay ─────────────────────────────────────
+        if has_final:
+            outer = QPainterPath()
+            outer.addRect(QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
+
+            inner = QPainterPath()
+            for poly in self._mask_polygons:
+                if len(poly) < 3:
+                    continue
+                path = QPainterPath()
+                pts  = [QPointF(*self._img_to_screen(p[0], p[1])) for p in poly]
+                path.moveTo(pts[0])
+                for pt in pts[1:]:
+                    path.lineTo(pt)
+                path.closeSubpath()
+                inner = inner.united(path)
+
+            excluded = outer.subtracted(inner)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(0, 0, 0, 148)))
+            painter.drawPath(excluded)
+
+            # Draw polygon outlines
+            for poly in self._mask_polygons:
+                if len(poly) < 3:
+                    continue
+                pts = [QPointF(*self._img_to_screen(p[0], p[1])) for p in poly]
+                painter.setPen(QPen(QColor("#00FF88"), 2.0))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPolygon(QPolygonF(pts))
+
+        # ── In-progress polygon (dashed, vertex dots) ───────────────────
+        if has_current:
+            pts = self._mask_current_pts
+            pen = QPen(QColor("#44FF99"), 1.5, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for i in range(len(pts) - 1):
+                painter.drawLine(pts[i], pts[i + 1])
+            # Line from last point to cursor for live preview
+            painter.setPen(QPen(QColor("#44FF99"), 1.0, Qt.PenStyle.DotLine))
+            # vertex dots
+            painter.setBrush(QBrush(QColor("#00FF88")))
+            painter.setPen(Qt.PenStyle.NoPen)
+            for pt in pts:
+                painter.drawEllipse(pt, 3.5, 3.5)
+            # First vertex larger — click here to close
+            if pts:
+                painter.setBrush(QBrush(QColor("#FFFF44")))
+                painter.drawEllipse(pts[0], 6, 6)
+            # Instruction label
+            painter.setPen(QColor("#88FFBB"))
+            painter.setFont(QFont("Segoe UI", 9))
+            painter.drawText(QPointF(sx0 + 4, sy1 - 8),
+                             f"Mask: {len(pts)} pts — click to add · dbl-click to close · Esc cancel")
 
     def _paint_roi_overlay(self, painter: QPainter):
         from PyQt6.QtCore import QRectF
@@ -701,6 +813,10 @@ class GLImageViewer(QOpenGLWidget):
                 self._drag_start  = event.position()
                 self._drag_offset = QPointF(self._offset)
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            elif self._tool == "mask":
+                # Add vertex to current polygon
+                self._mask_current_pts.append(QPointF(event.position()))
+                self.update()
             else:
                 self._tdrag_start = event.position()
                 self._tdrag_now   = event.position()
@@ -708,6 +824,10 @@ class GLImageViewer(QOpenGLWidget):
             if self._tool == "navigate":
                 self._rb_start   = event.position()
                 self._rb_current = event.position()
+            elif self._tool == "mask":
+                # Right click cancels current in-progress polygon
+                self._mask_current_pts = []
+                self.update()
             else:
                 # Right drag = pan in all tool modes
                 self._drag_start  = event.position()
@@ -845,7 +965,37 @@ class GLImageViewer(QOpenGLWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.fit_to_window()
+            if self._tool == "mask":
+                self._close_mask_polygon()
+            else:
+                self.fit_to_window()
+
+    def keyPressEvent(self, event):
+        if self._tool == "mask" and event.key() == Qt.Key.Key_Escape:
+            self._mask_current_pts = []
+            self.update()
+        else:
+            super().keyPressEvent(event)
+
+    def _close_mask_polygon(self):
+        """Finalize current polygon (requires >= 3 vertices)."""
+        pts = self._mask_current_pts
+        if len(pts) < 3:
+            self._mask_current_pts = []
+            self.update()
+            return
+        # Convert screen coords to image coords
+        H, W = self._img_h, self._img_w
+        poly = []
+        for pt in pts:
+            ix, iy = self.pixel_at(int(pt.x()), int(pt.y()))
+            ix = max(0, min(ix, W - 1))
+            iy = max(0, min(iy, H - 1))
+            poly.append([ix, iy])
+        self._mask_polygons.append(poly)
+        self._mask_current_pts = []
+        self.mask_polygon_added.emit(poly)
+        self.update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -65,16 +65,17 @@ class AnalysisWorker(QThread):
     finished = pyqtSignal(object, object)   # FocusResult, QualityResult
 
     def __init__(self, image: np.ndarray, focus: FocusEngine, quality: QualityEngine,
-                 reference=None):
+                 reference=None, mask=None):
         super().__init__()
         self._image     = image
         self._focus     = focus
         self._quality   = quality
         self._reference = reference
+        self._mask      = mask
 
     def run(self):
-        focus_result   = self._focus.analyze(self._image, self._reference)
-        quality_result = self._quality.analyze(self._image)
+        focus_result   = self._focus.analyze(self._image, self._reference, self._mask)
+        quality_result = self._quality.analyze(self._image, self._mask)
         self.finished.emit(focus_result, quality_result)
 
 
@@ -94,6 +95,10 @@ class MainWindow(QMainWindow):
         self._last_focus_result = None
         self._last_quality_result = None
         self._mm_per_px: float = 0.0
+
+        # Mask system
+        from src.analysis.mask_engine import MaskData
+        self._mask_data: MaskData | None = None   # current inspection mask
 
         # Reference system
         from src.analysis.focus_engine import FocusReference
@@ -397,6 +402,7 @@ class MainWindow(QMainWindow):
             ("profile",  "📈 Profile",   "Draw line → intensity chart in Inspector"),
             ("annotate", "📍 Annotate",  "Click to place defect markers"),
             ("measure",  "↔ Measure",   "Drag to measure distance (px / mm)"),
+            ("mask",     "⬡ Mask",      "Draw inspection region polygon — metrics computed only inside"),
         ]
         for tool_id, label, tip in tools:
             btn = QPushButton(label)
@@ -408,6 +414,51 @@ class MainWindow(QMainWindow):
             row.addWidget(btn)
 
         self._tool_buttons["navigate"].setChecked(True)
+
+        row.addSpacing(12)
+
+        # Mask: auto-detect reflections
+        self._mask_auto_btn = QPushButton("✦ Auto-Detect")
+        self._mask_auto_btn.setToolTip(
+            "Automatically detect specular reflection regions\n"
+            "and suggest an inspection mask that excludes them"
+        )
+        self._mask_auto_btn.setCheckable(False)
+        self._mask_auto_btn.setStyleSheet(
+            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
+            "              padding:3px 10px; font-size:10px; }"
+            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
+        )
+        self._mask_auto_btn.clicked.connect(self._mask_auto_detect)
+        row.addWidget(self._mask_auto_btn)
+
+        # Mask: apply to all images in folder
+        self._mask_apply_btn = QPushButton("📋 Apply to Folder")
+        self._mask_apply_btn.setToolTip(
+            "Align and apply current mask to all images in the folder.\n"
+            "Phase 1 (fixed camera): copy directly.\n"
+            "Phase 3 (part moves): auto-align using edge matching."
+        )
+        self._mask_apply_btn.setCheckable(False)
+        self._mask_apply_btn.setStyleSheet(
+            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
+            "              padding:3px 10px; font-size:10px; }"
+            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
+        )
+        self._mask_apply_btn.clicked.connect(self._mask_apply_to_folder)
+        row.addWidget(self._mask_apply_btn)
+
+        # Clear mask button
+        self._mask_clear_btn = QPushButton("⬡ Clear Mask")
+        self._mask_clear_btn.setToolTip("Remove inspection mask — analyze full image")
+        self._mask_clear_btn.setCheckable(False)
+        self._mask_clear_btn.setStyleSheet(
+            "QPushButton { background:#0A1828; color:#664444; border:1px solid #2A1A1A; "
+            "              padding:3px 10px; font-size:10px; }"
+            "QPushButton:hover { color:#FF8888; background:#1A0808; }"
+        )
+        self._mask_clear_btn.clicked.connect(self._mask_clear)
+        row.addWidget(self._mask_clear_btn)
 
         row.addSpacing(12)
 
@@ -478,6 +529,10 @@ class MainWindow(QMainWindow):
 
         # Inspector annotation clear button
         self.inspector._ann_clear_btn.clicked.connect(self._clear_annotations)
+
+        # Mask signals
+        self.viewer.mask_polygon_added.connect(self._on_mask_polygon_added)
+        self.viewer.mask_cleared.connect(self._on_mask_cleared)
 
     # ═══════════════════════════════════════════════════════════════
     #  Menu
@@ -671,8 +726,9 @@ class MainWindow(QMainWindow):
         self.browser.highlight_path(data.path)
         self.viewer.clear_tool_overlays()   # clear previous image's overlays
         self._load_annotations()            # restore saved annotations for this image
+        self._load_mask()                   # restore saved mask for this image
         self._display_current()
-        self._update_ref_status()           # enable reference buttons now image is loaded
+        self._update_ref_status()
         self._run_analysis()
         self._status_main.setText(
             f"  {data.filename}   {data.shape_str()}   {self._image_position_text()}"
@@ -697,8 +753,8 @@ class MainWindow(QMainWindow):
         # Update 3D surface with processed image
         self.surface_3d.set_image(processed)
 
-        # Update histogram in inspector
-        hist_data = self.quality_engine.compute_histogram(processed)
+        # Update histogram in inspector (masked if mask active)
+        hist_data = self.quality_engine.compute_histogram(processed, mask=self._mask_data)
         self.inspector.update_histogram(hist_data)
 
     def _run_analysis(self):
@@ -714,6 +770,7 @@ class MainWindow(QMainWindow):
             self.focus_engine,
             self.quality_engine,
             self._focus_reference,
+            self._mask_data,
         )
         self._analysis_worker.finished.connect(self._on_analysis_done)
         self._analysis_worker.start()
@@ -1038,6 +1095,244 @@ class MainWindow(QMainWindow):
             self._ref_status_lbl.setStyleSheet(
                 "color:#5599BB; font-size:9px; font-weight:600; padding:2px;"
             )
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Mask System
+    # ═══════════════════════════════════════════════════════════════
+
+    def _mask_path(self, image_path: str = None) -> str:
+        p = image_path or (self.current_image.path or "")
+        return p + ".mask.json" if p else ""
+
+    def _save_mask(self):
+        if not self.current_image.path or self._mask_data is None:
+            return
+        try:
+            self._mask_data.save(self._mask_path())
+        except Exception:
+            pass
+
+    def _load_mask(self):
+        """Load mask from disk for the current image. Auto-align if from a different image."""
+        if not self.current_image.path:
+            return
+        from src.analysis.mask_engine import MaskData
+        path = self._mask_path()
+        try:
+            mask = MaskData.load(path)
+            self._mask_data = mask
+            self.viewer.set_mask_polygons(mask.polygons)
+            self.inspector.update_mask_status(mask)
+        except FileNotFoundError:
+            # No mask file for this image — check if we should auto-align from previous
+            if self._mask_data is not None and self.current_image.is_loaded():
+                self._mask_auto_align()
+            else:
+                self._mask_data = None
+                self.viewer.set_mask_polygons([])
+                self.inspector.update_mask_status(None)
+        except Exception:
+            pass
+
+    def _on_mask_polygon_added(self, poly: list):
+        """New polygon closed by user — add to MaskData and re-analyze."""
+        from src.analysis.mask_engine import MaskData
+        H, W = self.current_image.raw.shape[:2] if self.current_image.is_loaded() else (0, 0)
+        if self._mask_data is None:
+            self._mask_data = MaskData(
+                polygons     = [poly],
+                image_shape  = (H, W),
+                source_image = self.current_image.filename,
+            )
+        else:
+            self._mask_data.polygons.append(poly)
+            self._mask_data.image_shape  = (H, W)
+            self._mask_data.source_image = self.current_image.filename
+        self._save_mask()
+        self.inspector.update_mask_status(self._mask_data)
+        self._run_analysis()
+        pct = self._mask_data.coverage_pct()
+        self._status_main.setText(
+            f"  Mask polygon added — {len(self._mask_data.polygons)} region(s) "
+            f"covering {pct:.1f}% of image"
+        )
+
+    def _on_mask_cleared(self):
+        self._mask_data = None
+        self.inspector.update_mask_status(None)
+        self._save_mask()   # removes file
+        self._run_analysis()
+
+    def _mask_clear(self):
+        self.viewer.clear_mask()
+        # Also delete the mask file
+        import os as _os
+        p = self._mask_path()
+        if p and _os.path.exists(p):
+            try:
+                _os.remove(p)
+            except Exception:
+                pass
+
+    def _mask_auto_detect(self):
+        """Phase 2: Auto-detect specular reflections and suggest inspection mask."""
+        if not self.current_image.is_loaded():
+            return
+        from src.analysis.mask_engine import MaskEngine
+        self._status_main.setText("  Detecting reflections…")
+        mask = MaskEngine.detect_reflections(self.current_image.raw)
+        if mask is None:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Auto-Detect",
+                "No significant specular reflections detected.\n\n"
+                "The image appears clean. You can draw a manual mask if needed."
+            )
+            self._status_main.setText("  No reflections detected")
+            return
+        mask.source_image = self.current_image.filename
+        self._mask_data = mask
+        self.viewer.set_mask_polygons(mask.polygons)
+        self.inspector.update_mask_status(mask)
+        self._save_mask()
+        self._run_analysis()
+        pct = mask.coverage_pct()
+        self._status_main.setText(
+            f"  Auto-detected inspection region: {pct:.1f}% of image "
+            f"(reflections excluded)"
+        )
+
+    def _mask_auto_align(self):
+        """Phase 3: Auto-align the existing mask to the current image using ECC."""
+        if self._mask_data is None or not self.current_image.is_loaded():
+            return
+        from src.analysis.mask_engine import MaskEngine
+        ref_src = self._mask_data.source_image
+        # Load the reference image to use for alignment
+        ref_path = ""
+        if self.folder_images:
+            ref_path = next(
+                (p for p in self.folder_images
+                 if __import__("os").path.basename(p) == ref_src), ""
+            )
+        if not ref_path or not __import__("os").path.exists(ref_path):
+            # Cannot load reference — use mask as-is (fixed camera assumption)
+            self._status_main.setText(
+                f"  Mask from {ref_src} applied directly (reference not found for alignment)"
+            )
+            return
+
+        try:
+            from src.core.image_loader import load_image
+            ref_data = load_image(ref_path)
+            aligned, confidence = MaskEngine.align_mask(
+                ref_data.raw, self.current_image.raw, self._mask_data
+            )
+            aligned.source_image = self._mask_data.source_image
+
+            conf_label = (
+                "HIGH" if confidence >= 80 else
+                "MEDIUM" if confidence >= 50 else "LOW"
+            )
+
+            if confidence >= 50:
+                # Apply automatically — but show confidence to user
+                self._mask_data = aligned
+                self.viewer.set_mask_polygons(aligned.polygons)
+                self.inspector.update_mask_status(aligned)
+                self._save_mask()
+                self._run_analysis()
+                self._status_main.setText(
+                    f"  Mask auto-aligned from {ref_src} — "
+                    f"confidence: {confidence:.0f}% ({conf_label})"
+                )
+            else:
+                # Low confidence — ask user
+                from PyQt6.QtWidgets import QMessageBox
+                btn = QMessageBox.question(
+                    self, "Mask Alignment — Low Confidence",
+                    f"Mask alignment confidence is LOW ({confidence:.0f}%).\n\n"
+                    f"The part may have moved significantly or the image is very different.\n\n"
+                    f"Apply the aligned mask anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if btn == QMessageBox.StandardButton.Yes:
+                    self._mask_data = aligned
+                    self.viewer.set_mask_polygons(aligned.polygons)
+                    self.inspector.update_mask_status(aligned)
+                    self._save_mask()
+                    self._run_analysis()
+                else:
+                    self._mask_data = None
+                    self.viewer.set_mask_polygons([])
+                    self.inspector.update_mask_status(None)
+        except Exception as e:
+            self._status_main.setText(f"  Mask alignment failed: {e}")
+
+    def _mask_apply_to_folder(self):
+        """Apply current mask to all images in the folder (with auto-alignment)."""
+        if self._mask_data is None:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Apply Mask to Folder",
+                "No mask is active. Draw a mask on this image first,\n"
+                "then click 'Apply to Folder'."
+            )
+            return
+        if not self.folder_images:
+            return
+
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from PyQt6.QtCore import Qt as _Qt
+        from src.analysis.mask_engine import MaskEngine
+        from src.core.image_loader import load_image
+        import os as _os
+
+        curr_path = self.current_image.path
+        others    = [p for p in self.folder_images if p != curr_path]
+        if not others:
+            QMessageBox.information(self, "Apply Mask", "No other images in folder.")
+            return
+
+        progress = QProgressDialog(
+            "Aligning mask to folder images…", "Cancel", 0, len(others), self
+        )
+        progress.setWindowModality(_Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        results = []
+        for i, path in enumerate(others):
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+            try:
+                data    = load_image(path)
+                aligned, conf = MaskEngine.align_mask(
+                    self.current_image.raw, data.raw, self._mask_data
+                )
+                aligned.source_image = self._mask_data.source_image
+                aligned.save(self._mask_path(path))
+                results.append((
+                    _os.path.basename(path),
+                    conf,
+                    "HIGH" if conf >= 80 else "MEDIUM" if conf >= 50 else "LOW"
+                ))
+            except Exception as e:
+                results.append((_os.path.basename(path), 0.0, f"ERROR: {e}"))
+
+        progress.setValue(len(others))
+
+        # Summary report
+        lines = [f"Mask applied to {len(results)} images:\n"]
+        for name, conf, label in results:
+            lines.append(f"  {label:6s}  {conf:5.0f}%  {name}")
+        low_conf = [r for r in results if r[2] == "LOW"]
+        if low_conf:
+            lines.append(f"\n⚠ {len(low_conf)} image(s) have LOW confidence — verify manually.")
+        QMessageBox.information(self, "Apply Mask — Done", "\n".join(lines))
+        self._status_main.setText(
+            f"  Mask applied to {len(results)} images in folder"
+        )
 
     def _refresh_focus_assist(self):
         if self._last_focus_result is not None and self._last_quality_result is not None:
