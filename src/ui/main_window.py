@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QStackedWidget, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QKeySequence, QAction, QIcon
+from PyQt6.QtGui import QKeySequence, QAction, QIcon, QShortcut
 
 from src.core.config import Config
 from src.core.image_data import ImageData
@@ -681,12 +681,16 @@ class MainWindow(QMainWindow):
         for name, dock in self._docks.items():
             m.addAction(dock.toggleViewAction())
 
-        # ── Navigate ───────────────────────────────────────────────
-        m = mb.addMenu("&Navigate")
-        self._action(m, "Previous Image",  self._prev_image, "Left")
-        self._action(m, "Next Image",      self._next_image, "Right")
-        self._action(m, "First Image",     self._first_image, "Home")
-        self._action(m, "Last Image",      self._last_image,  "End")
+        # ── Image navigation — app-wide shortcuts (work even when viewer has focus) ──
+        for key, slot in [
+            ("Left",  self._prev_image),
+            ("Right", self._next_image),
+            ("Home",  self._first_image),
+            ("End",   self._last_image),
+        ]:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(slot)
 
         # ── Pipeline ───────────────────────────────────────────────
         m = mb.addMenu("&Pipeline")
