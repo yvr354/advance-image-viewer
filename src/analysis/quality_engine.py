@@ -47,18 +47,30 @@ class QualityEngine:
         self.underexpose_threshold = underexpose_threshold
         self.pass_threshold = pass_threshold
 
-    def analyze(self, image: np.ndarray) -> QualityResult:
+    def analyze(self, image: np.ndarray, mask=None) -> QualityResult:
         gray = self._to_gray_8bit(image)
-        flat = gray.flatten().astype(np.float64)
 
-        mean_b = float(np.mean(flat))
-        std_b  = float(np.std(flat))
-        min_b  = int(np.min(flat))
-        max_b  = int(np.max(flat))
+        # If mask provided, compute all statistics only on valid pixels
+        if mask is not None:
+            mask_arr  = mask.to_array(gray.shape[:2]).astype(bool)
+            valid_px  = gray[mask_arr]
+            if valid_px.size < 64:
+                mask_arr = None   # too few valid pixels — fall back to full image
+                valid_px = gray.flatten()
+        else:
+            mask_arr = None
+            valid_px = gray.flatten()
+
+        flat = valid_px.astype(np.float64)
+
+        mean_b   = float(np.mean(flat))
+        std_b    = float(np.std(flat))
+        min_b    = int(np.min(flat))
+        max_b    = int(np.max(flat))
         median_b = float(np.median(flat))
 
-        over_pct  = float(np.sum(gray > self.overexpose_threshold) / gray.size * 100)
-        under_pct = float(np.sum(gray < self.underexpose_threshold) / gray.size * 100)
+        over_pct  = float(np.sum(valid_px > self.overexpose_threshold)  / flat.size * 100)
+        under_pct = float(np.sum(valid_px < self.underexpose_threshold) / flat.size * 100)
         exposure_ok = (over_pct < 1.0) and (under_pct < 1.0)
 
         rms_contrast = float(std_b / 255.0 * 100)
@@ -66,7 +78,7 @@ class QualityEngine:
         michelson = float((max_b - min_b) / denom) if denom > 0 else 0.0
         dr_stops = float(np.log2(max_b / max(min_b, 1))) if max_b > 0 else 0.0
 
-        noise_level = self._estimate_noise(gray)
+        noise_level = self._estimate_noise(gray, mask_arr)
         signal = max(mean_b, 1.0)
         snr_db = float(20 * np.log10(signal / max(noise_level, 0.001)))
 
@@ -94,19 +106,24 @@ class QualityEngine:
             hist_median=median_b,
         )
 
-    def compute_histogram(self, image: np.ndarray, bins: int = 256) -> dict:
-        """Return histogram data for all channels."""
-        image = self._to_display_8bit(image)
+    def compute_histogram(self, image: np.ndarray,
+                          bins: int = 256, mask=None) -> dict:
+        """Return histogram data for all channels, optionally masked."""
+        image    = self._to_display_8bit(image)
+        mask_arr = None
+        if mask is not None:
+            m = mask.to_array(image.shape[:2]).astype(np.uint8) * 255
+            mask_arr = m
         result = {}
         if image.ndim == 2:
-            hist = cv2.calcHist([image], [0], None, [bins], [0, 256])
+            hist = cv2.calcHist([image], [0], mask_arr, [bins], [0, 256])
             result["gray"] = hist.flatten()
         else:
             for i, ch in enumerate(["red", "green", "blue"]):
-                hist = cv2.calcHist([image], [i], None, [bins], [0, 256])
+                hist = cv2.calcHist([image], [i], mask_arr, [bins], [0, 256])
                 result[ch] = hist.flatten()
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            hist = cv2.calcHist([gray], [0], None, [bins], [0, 256])
+            hist = cv2.calcHist([gray], [0], mask_arr, [bins], [0, 256])
             result["luma"] = hist.flatten()
         return result
 
@@ -115,13 +132,17 @@ class QualityEngine:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _estimate_noise(gray: np.ndarray) -> float:
+    def _estimate_noise(gray: np.ndarray,
+                        mask: np.ndarray = None) -> float:
         """Estimate noise using Laplacian method (fast, no flat-region search needed)."""
-        h, w = gray.shape
-        kernel = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], dtype=np.float64)
+        kernel   = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], dtype=np.float64)
         filtered = cv2.filter2D(gray.astype(np.float64), -1, kernel)
-        sigma = np.sqrt(np.abs(np.mean(filtered ** 2)))
-        # Normalize to 0–100 scale
+        if mask is not None:
+            vals = filtered[mask]
+            sq   = float(np.mean(vals ** 2)) if vals.size >= 16 else 0.0
+        else:
+            sq = float(np.mean(filtered ** 2))
+        sigma = np.sqrt(np.abs(sq))
         return float(min(sigma / 2.0, 100.0))
 
     def _composite_score(

@@ -41,7 +41,9 @@ import numpy as np
 import cv2
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.analysis.mask_engine import MaskData
 
 
 # ── Reference image ────────────────────────────────────────────────────────
@@ -161,24 +163,27 @@ class FocusEngine:
     # ── Public API ─────────────────────────────────────────────────────────
 
     def analyze(self, image: np.ndarray,
-                reference: Optional[FocusReference] = None) -> FocusResult:
+                reference: Optional[FocusReference] = None,
+                mask=None) -> FocusResult:
         """
         Analyze focus. If reference is provided, scores are % of reference.
+        If mask (MaskData) is provided, metrics are computed only inside the mask.
         Without reference: RELATIVE mode — honest but limited.
         """
-        gray = self._to_gray_8bit(image)
+        gray      = self._to_gray_8bit(image)
+        mask_arr  = mask.to_array(gray.shape[:2]) if mask is not None else None
 
         # Whole-image raw metrics (unscaled — used for honest reporting)
-        raw_lap     = self._raw_laplacian(gray)
-        raw_ten     = self._raw_tenengrad(gray)
-        raw_brenner = self._raw_brenner(gray)
+        raw_lap     = self._raw_laplacian(gray,  mask_arr)
+        raw_ten     = self._raw_tenengrad(gray,  mask_arr)
+        raw_brenner = self._raw_brenner(gray,    mask_arr)
 
         # Whole-image score (Laplacian scaled to 0–1000 for verdict)
         whole_score = float(min(raw_lap / 5.0, 1000.0))
         verdict     = self._verdict(whole_score)
 
-        # Build reference-aware grid
-        grid_data = self._build_grid(gray, reference)
+        # Build reference-aware, mask-aware grid
+        grid_data = self._build_grid(gray, reference, mask_arr)
 
         # Confidence: how much to trust this verdict
         scoring_mode = grid_data.scoring_mode
@@ -250,22 +255,39 @@ class FocusEngine:
     # ── Whole-image raw metrics (unscaled) ────────────────────────────────
 
     @staticmethod
-    def _raw_laplacian(gray: np.ndarray) -> float:
+    def _raw_laplacian(gray: np.ndarray,
+                       mask: np.ndarray = None) -> float:
         """Variance of Laplacian — Pertuz 2013 recommended for low-noise cameras."""
-        return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        lap = cv2.Laplacian(gray, cv2.CV_64F)
+        if mask is not None:
+            vals = lap[mask.astype(bool)]
+            return float(np.var(vals)) if vals.size >= 16 else 0.0
+        return float(lap.var())
 
     @staticmethod
-    def _raw_tenengrad(gray: np.ndarray) -> float:
+    def _raw_tenengrad(gray: np.ndarray,
+                       mask: np.ndarray = None) -> float:
         """Sum of squared Sobel gradients — Pertuz 2013 top overall ranking."""
         sx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         sy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        return float(np.mean(sx**2 + sy**2))
+        g  = sx**2 + sy**2
+        if mask is not None:
+            vals = g[mask.astype(bool)]
+            return float(np.mean(vals)) if vals.size >= 16 else 0.0
+        return float(np.mean(g))
 
     @staticmethod
-    def _raw_brenner(gray: np.ndarray) -> float:
+    def _raw_brenner(gray: np.ndarray,
+                     mask: np.ndarray = None) -> float:
         """Brenner gradient — fastest; good validation on high-SNR cameras."""
         d = gray.astype(np.float64)
-        return float(np.sum((d[:, 2:] - d[:, :-2])**2) / gray.size)
+        b = (d[:, 2:] - d[:, :-2]) ** 2
+        if mask is not None:
+            # Only include positions where BOTH columns are valid
+            m = mask[:, 2:].astype(bool) & mask[:, :-2].astype(bool)
+            vals = b[m]
+            return float(np.mean(vals)) if vals.size >= 16 else 0.0
+        return float(np.mean(b))
 
     # Legacy scaled versions (keep backward compat with score_only / batch)
     @staticmethod
@@ -281,13 +303,15 @@ class FocusEngine:
     # ── Grid analysis ──────────────────────────────────────────────────────
 
     def _build_grid(self, gray: np.ndarray,
-                    reference: Optional[FocusReference] = None) -> FocusGridData:
+                    reference: Optional[FocusReference] = None,
+                    mask: np.ndarray = None) -> FocusGridData:
         h, w = gray.shape
         R = min(self.grid, h)
         C = min(self.grid, w)
 
-        lap = np.zeros((R, C), dtype=np.float32)
-        ten = np.zeros((R, C), dtype=np.float32)
+        lap     = np.zeros((R, C), dtype=np.float32)
+        ten     = np.zeros((R, C), dtype=np.float32)
+        invalid = np.zeros((R, C), dtype=bool)   # cells with <15% valid pixels
 
         for r in range(R):
             for c in range(C):
@@ -295,9 +319,18 @@ class FocusEngine:
                 x0, x1 = int(c*w/C), int((c+1)*w/C)
                 cell = gray[y0:y1, x0:x1]
                 if cell.size < 16:
+                    invalid[r, c] = True
                     continue
-                lap[r, c] = self._raw_laplacian(cell)
-                ten[r, c] = self._raw_tenengrad(cell)
+
+                cell_mask = mask[y0:y1, x0:x1] if mask is not None else None
+
+                # Skip cell if less than 15% of its pixels are valid
+                if cell_mask is not None and cell_mask.mean() < 0.15:
+                    invalid[r, c] = True
+                    continue
+
+                lap[r, c] = self._raw_laplacian(cell, cell_mask)
+                ten[r, c] = self._raw_tenengrad(cell, cell_mask)
 
         # ── Score computation ────────────────────────────────────────────
         ref_ok = (reference is not None and
@@ -319,19 +352,31 @@ class FocusEngine:
             scoring_mode = "RELATIVE"
 
         fused = fused.astype(np.float32)
+        # Mark invalid cells with -1 (excluded from best/worst/percentages)
+        fused[invalid] = -1.0
 
-        best_flat  = int(np.argmax(fused))
-        worst_flat = int(np.argmin(fused))
-        best_cell  = (best_flat  // C, best_flat  % C)
-        worst_cell = (worst_flat // C, worst_flat % C)
+        valid_mask = ~invalid
+        if valid_mask.any():
+            valid_scores = fused[valid_mask]
+            best_flat_v  = int(np.argmax(valid_scores))
+            worst_flat_v = int(np.argmin(valid_scores))
+            valid_idx    = np.argwhere(valid_mask)
+            best_cell    = tuple(valid_idx[best_flat_v])
+            worst_cell   = tuple(valid_idx[worst_flat_v])
+        else:
+            best_cell  = (0, 0)
+            worst_cell = (0, 0)
 
-        sharp_mask  = fused >= self.SHARP_PCT
-        soft_mask   = (fused >= self.SOFT_PCT) & ~sharp_mask
-        blurry_mask = fused < self.SOFT_PCT
-        total = R * C
-        pct_sharp  = 100.0 * sharp_mask.sum()  / total
-        pct_soft   = 100.0 * soft_mask.sum()   / total
-        pct_blurry = 100.0 * blurry_mask.sum() / total
+        valid_cells = valid_mask.sum()
+        if valid_cells > 0:
+            sharp_mask  = valid_mask & (fused >= self.SHARP_PCT)
+            soft_mask   = valid_mask & (fused >= self.SOFT_PCT) & (fused < self.SHARP_PCT)
+            blurry_mask = valid_mask & (fused >= 0) & (fused < self.SOFT_PCT)
+            pct_sharp  = 100.0 * sharp_mask.sum()  / valid_cells
+            pct_soft   = 100.0 * soft_mask.sum()   / valid_cells
+            pct_blurry = 100.0 * blurry_mask.sum() / valid_cells
+        else:
+            pct_sharp = pct_soft = pct_blurry = 0.0
 
         row_means = fused.mean(axis=1)
         col_means = fused.mean(axis=0)

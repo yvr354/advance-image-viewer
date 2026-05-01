@@ -51,6 +51,7 @@ class InspectorPanel(QScrollArea):
         self._layout.setSpacing(4)
         self.setWidget(container)
 
+        self._build_mask_status()
         self._build_focus_group()
         self._build_quality_group()
         self._build_histogram_group()
@@ -61,6 +62,46 @@ class InspectorPanel(QScrollArea):
         self._build_measure_group()
 
         self._layout.addStretch()
+
+    # ── Mask status banner ─────────────────────────────────────────────────
+
+    def _build_mask_status(self):
+        self._mask_status = QLabel("No mask — full image analyzed")
+        self._mask_status.setWordWrap(True)
+        self._mask_status.setStyleSheet(
+            "color:#336633; font-size:9px; padding:3px 4px; "
+            "background:#0A1408; border:1px solid #1A2A1A;"
+        )
+        self._layout.addWidget(self._mask_status)
+
+    def update_mask_status(self, mask):
+        if mask is None or not mask.polygons:
+            self._mask_status.setText("No mask — full image analyzed")
+            self._mask_status.setStyleSheet(
+                "color:#336633; font-size:9px; padding:3px 4px; "
+                "background:#0A1408; border:1px solid #1A2A1A;"
+            )
+            return
+        n    = len(mask.polygons)
+        pct  = mask.coverage_pct()
+        auto = " (auto-detected)" if mask.auto_detected else ""
+        conf = mask.align_confidence
+        if conf < 100:
+            conf_txt = f"  align confidence: {conf:.0f}%"
+            conf_warn = "⚠ " if conf < 50 else ""
+        else:
+            conf_txt  = ""
+            conf_warn = ""
+
+        self._mask_status.setText(
+            f"⬡ MASK ACTIVE{auto} — {n} region(s) — {pct:.1f}% of image\n"
+            f"   {conf_warn}Metrics computed inside mask only{conf_txt}"
+        )
+        color = "#FFAA44" if conf < 50 else "#44FF88"
+        self._mask_status.setStyleSheet(
+            f"color:{color}; font-size:9px; padding:3px 4px; "
+            f"background:#0A140A; border:1px solid #1A3A1A; font-weight:600;"
+        )
 
     # ── Focus ──────────────────────────────────────────────────────────────
 
