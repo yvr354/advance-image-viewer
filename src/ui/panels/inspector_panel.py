@@ -521,8 +521,7 @@ class InspectorPanel(QScrollArea):
         self._layout.addWidget(self._ann_group)
 
     def show_annotation_tools(self, visible: bool):
-        if visible:
-            self._ann_group.setVisible(True)
+        pass  # group visibility controlled entirely by refresh_annotations
 
     def refresh_annotations(self, annotations: list):
         """Re-populate annotation table from viewer's annotation list."""
@@ -547,10 +546,9 @@ class InspectorPanel(QScrollArea):
 
         n = len(annotations)
         self._ann_count_lbl.setText(f"{n} annotation{'s' if n != 1 else ''}")
-        hint_vis = n == 0
-        self._ann_hint.setVisible(hint_vis)
-        self._ann_table.setVisible(not hint_vis or True)
-        self._ann_group.setVisible(True)
+        self._ann_hint.setVisible(False)
+        self._ann_table.setVisible(n > 0)
+        self._ann_group.setVisible(n > 0)
 
     # ── Measurement ────────────────────────────────────────────────────────
 

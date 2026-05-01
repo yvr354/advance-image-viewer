@@ -31,7 +31,25 @@
       "Read(//c/Program Files \\(x86\\)/**)",
       "Read(//c/Program Files/**)",
       "Bash(venv/Scripts/python -m py_compile src/ui/main_window.py main.py)",
-      "Bash(venv/Scripts/python -c ' *)"
+      "Bash(venv/Scripts/python -c ' *)",
+      "Bash(venv/Scripts/python -c \"from src.ui.dialogs.batch_dialog import BatchDialog; print\\('BatchDialog import OK'\\)\")",
+      "Bash(venv/Scripts/python -c \"from src.ui.panels.inspector_panel import InspectorPanel; from src.ui.main_window import MainWindow; print\\('OK'\\)\")",
+      "WebFetch(domain:isp-utb.github.io)",
+      "WebFetch(domain:opencv.org)",
+      "WebFetch(domain:www.mdpi.com)",
+      "WebFetch(domain:www.imatest.com)",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:sites.google.com)",
+      "WebFetch(domain:blog.roboflow.com)",
+      "WebFetch(domain:intelgic.com)",
+      "WebFetch(domain:pyimagesearch.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:link.springer.com)",
+      "Bash(python -c \"from src.ui.main_window import MainWindow; print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/ui/main_window.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/ui/main_window.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/analysis/focus_engine.py', encoding='utf-8'\\).read\\(\\)\\); print\\('focus_engine OK'\\)\")",
+      "Bash(python -c ' *)"
     ]
   }
 }

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:asmedigitalcollection.asme.org)",
+      "WebFetch(domain:ieeexplore.ieee.org)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

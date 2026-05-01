@@ -294,7 +294,7 @@ class GLImageViewer(QOpenGLWidget):
             self._upload_image_texture(self._pending_image)
             self._pending_image = None
             if self._pending_center:
-                self._center()
+                self.fit_to_window()
                 self._pending_center = False
 
         # Consume deferred heatmap upload
