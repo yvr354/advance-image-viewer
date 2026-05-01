@@ -50,8 +50,10 @@ class Config:
     camera_gain_db: float = 0.0
 
     # Window geometry
-    window_width: int = 1600
-    window_height: int = 900
+    window_width: int = 1400
+    window_height: int = 860
+    window_x: int = -1       # -1 = not yet set, centre on first launch
+    window_y: int = -1
     window_maximized: bool = False
 
     _config_path: str = field(default="", init=False, repr=False, compare=False)

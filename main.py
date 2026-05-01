@@ -35,7 +35,6 @@ def main():
     config.load()
 
     window = MainWindow(config)
-    window.show()
 
     # Open file passed as argument (e.g. double-click on image)
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):

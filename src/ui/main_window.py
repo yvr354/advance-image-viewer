@@ -16,10 +16,11 @@ import cv2
 import numpy as np
 
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow, QDockWidget, QStatusBar, QMenu,
     QFileDialog, QMessageBox, QLabel, QWidget,
     QHBoxLayout, QVBoxLayout, QSizePolicy, QPushButton,
-    QButtonGroup, QStackedWidget, QFrame,
+    QButtonGroup, QStackedWidget, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QKeySequence, QAction, QIcon
@@ -38,6 +39,7 @@ from src.ui.panels.browser_panel    import BrowserPanel
 from src.ui.panels.fusion_panel     import FusionPanel
 from src.ui.panels.surface_3d_panel import Surface3DPanel
 from src.ui.panels.comparison_panel import ComparisonPanel
+from src.ui.panels.multi_viewer     import MultiViewer
 from src.ui.theme import VERDICT_COLOR, COLOR_PERFECT, COLOR_WARN, COLOR_FAIL
 
 
@@ -137,6 +139,12 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle("VyuhaAI Image Viewer")
+        self.setMinimumSize(700, 450)   # hard floor — never forced bigger by docks
+        # Prevent Qt from auto-resizing the main window when docks appear/disappear
+        self.setDockOptions(
+            QMainWindow.DockOption.AnimatedDocks |
+            QMainWindow.DockOption.AllowTabbedDocks
+        )
 
         # ── Central widget: OpenGL viewer ──────────────────────────
         # Central workspace: one active mode owns the main visual area.
@@ -160,6 +168,45 @@ class MainWindow(QMainWindow):
             self._mode_buttons[mode] = btn
             mode_bar.addWidget(btn)
         mode_bar.addStretch()
+
+        # ── Split layout buttons ───────────────────────────────────
+        _split_style = (
+            "QPushButton { background:#0C1824; color:#446688; border:1px solid #1A2A3A; "
+            "              padding:2px 8px; font-size:11px; border-radius:3px; }"
+            "QPushButton:checked { background:#0E2840; color:#00AAFF; border:1px solid #00AAFF; }"
+            "QPushButton:hover   { color:#AACCDD; }"
+        )
+        self._split_group  = QButtonGroup(self)
+        self._split_group.setExclusive(True)
+        self._split_buttons: dict[str, QPushButton] = {}
+        for key, label in [("1","▣"), ("2H","◫"), ("2V","⬒"), ("4","⊞")]:
+            sb = QPushButton(label)
+            sb.setCheckable(True)
+            sb.setFixedSize(28, 26)
+            sb.setToolTip({"1":"Single view","2H":"Split left|right",
+                           "2V":"Split top/bottom","4":"4-grid"}[key])
+            sb.setStyleSheet(_split_style)
+            sb.clicked.connect(lambda checked, k=key: self._set_split(k))
+            self._split_group.addButton(sb)
+            self._split_buttons[key] = sb
+            mode_bar.addWidget(sb)
+        self._split_buttons["1"].setChecked(True)
+
+        # ── Sync zoom toggle ──────────────────────────────────────
+        mode_bar.addSpacing(8)
+        self._btn_sync_zoom = QPushButton("⇄ Sync")
+        self._btn_sync_zoom.setCheckable(True)
+        self._btn_sync_zoom.setChecked(True)
+        self._btn_sync_zoom.setFixedHeight(26)
+        self._btn_sync_zoom.setToolTip("Sync zoom & pan across all split panels")
+        self._btn_sync_zoom.setStyleSheet(
+            "QPushButton { background:#0C1824; color:#446688; border:1px solid #1A2A3A; "
+            "              padding:2px 8px; font-size:11px; border-radius:3px; }"
+            "QPushButton:checked { background:#0E2840; color:#00AAFF; border:1px solid #00AAFF; }"
+            "QPushButton:hover   { color:#AACCDD; }"
+        )
+        mode_bar.addWidget(self._btn_sync_zoom)
+
         central_layout.addLayout(mode_bar)
 
         self._workspace = QStackedWidget()
@@ -182,10 +229,16 @@ class MainWindow(QMainWindow):
         self._inspect_toolbar = self._build_inspect_toolbar()
         image_layout.addWidget(self._inspect_toolbar)
 
-        self.viewer = GLImageViewer()
-        self.viewer.setAcceptDrops(True)
-        image_layout.addWidget(self.viewer)
+        self.multi_viewer = MultiViewer()
+        image_layout.addWidget(self.multi_viewer, stretch=1)
         self._workspace.addWidget(self._image_page)
+
+        # Primary viewer alias — always points to the active cell's GLImageViewer
+        self.viewer = self.multi_viewer.active_viewer
+
+        # Per-cell image data and analysis results
+        self._cell_images: list = [None, None, None, None]  # ImageData per cell
+        self.multi_viewer.active_changed.connect(self._on_active_cell_changed)
 
         self.comparison_panel = ComparisonPanel()
         self._workspace.addWidget(self.comparison_panel)
@@ -448,6 +501,36 @@ class MainWindow(QMainWindow):
         self._mask_apply_btn.clicked.connect(self._mask_apply_to_folder)
         row.addWidget(self._mask_apply_btn)
 
+        # Find all similar regions button
+        self._mask_find_all_btn = QPushButton("⧉ Find All Similar")
+        self._mask_find_all_btn.setToolTip(
+            "Draw mask around ONE example region, then click this.\n"
+            "Finds all identical/similar regions in the image and masks them all."
+        )
+        self._mask_find_all_btn.setCheckable(False)
+        self._mask_find_all_btn.setStyleSheet(
+            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
+            "              padding:3px 10px; font-size:10px; }"
+            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
+        )
+        self._mask_find_all_btn.clicked.connect(self._mask_find_all_similar)
+        row.addWidget(self._mask_find_all_btn)
+
+        # Save mask button
+        self._mask_save_btn = QPushButton("💾 Save Mask")
+        self._mask_save_btn.setToolTip(
+            "Save the current mask.\n"
+            "Choose: save mask position only, or export masked image file."
+        )
+        self._mask_save_btn.setCheckable(False)
+        self._mask_save_btn.setStyleSheet(
+            "QPushButton { background:#0A1828; color:#44AA66; border:1px solid #1A3A2A; "
+            "              padding:3px 10px; font-size:10px; }"
+            "QPushButton:hover { color:#88FFAA; background:#0A1E14; }"
+        )
+        self._mask_save_btn.clicked.connect(self._mask_save_dialog)
+        row.addWidget(self._mask_save_btn)
+
         # Clear mask button
         self._mask_clear_btn = QPushButton("⬡ Clear Mask")
         self._mask_clear_btn.setToolTip("Remove inspection mask — analyze full image")
@@ -495,8 +578,19 @@ class MainWindow(QMainWindow):
         ann_lbl.setStyleSheet("color:#2A3A4A; font-size:9px;")
         row.addWidget(ann_lbl)
 
-        bar.setVisible(False)
-        return bar
+        # Wrap in scroll area — buttons scroll horizontally instead of forcing window wider
+        scroll = QScrollArea()
+        scroll.setWidget(bar)
+        scroll.setWidgetResizable(False)
+        scroll.setFixedHeight(36)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumWidth(0)
+        scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        scroll.setVisible(False)
+        self._inspect_toolbar_bar = bar   # keep ref for visibility toggle
+        return scroll
 
     # ═══════════════════════════════════════════════════════════════
     #  Signal Wiring — everything connected to everything
@@ -508,6 +602,17 @@ class MainWindow(QMainWindow):
 
         # Viewer → inspector pixel display (live on mouse move)
         self.viewer.pixel_hovered.connect(self._on_pixel_hovered)
+
+        # Wire zoom + sync for ALL 4 cells (not just active)
+        for i in range(4):
+            v = self.multi_viewer.viewer_at(i)
+            idx = i
+            v.zoom_changed.connect(
+                lambda zoom, _i=idx: self.multi_viewer.update_cell_zoom(_i, zoom)
+            )
+            v.view_state_changed.connect(
+                lambda zoom, ox, oy, _i=idx: self._on_view_state_changed(_i, zoom, ox, oy)
+            )
 
         # Browser → open image
         self.browser.image_selected.connect(self.open_image)
@@ -618,6 +723,55 @@ class MainWindow(QMainWindow):
         if dock.isVisible():
             dock.raise_()
 
+    def _set_split(self, key: str):
+        """Change the split layout (1 / 2H / 2V / 4)."""
+        self.multi_viewer.set_layout(key)
+        self._split_buttons[key].setChecked(True)
+        self._rewire_active_viewer()
+        # Re-display so GL context shows current image after layout change
+        if self.current_image.is_loaded():
+            self._display_current(preserve_view=True)
+
+    def _on_active_cell_changed(self, idx: int):
+        """User clicked a different cell — update viewer alias and restore its image."""
+        self._rewire_active_viewer()
+        data = self._cell_images[idx]
+        if data is not None:
+            self.current_image = data
+            self._display_current(preserve_view=True)
+            self._run_analysis()
+            self._status_main.setText(
+                f"  [{idx+1}] {data.filename}   {data.shape_str()}"
+            )
+
+    def _rewire_active_viewer(self):
+        """Point self.viewer to the currently active GLImageViewer cell."""
+        old = self.viewer
+        new = self.multi_viewer.active_viewer
+        if old is new:
+            return
+        # Re-connect signals from the new active viewer
+        try:
+            old.pixel_hovered.disconnect(self._on_pixel_hovered)
+            old.zoom_changed.disconnect(self._on_zoom_changed)
+            old.roi_selected.disconnect(self._on_roi_selected)
+            old.line_profile_drawn.disconnect(self._on_line_profile_drawn)
+            old.annotation_placed.disconnect(self._on_annotation_placed)
+            old.measure_done.disconnect(self._on_measure_done)
+            old.mask_polygon_added.disconnect(self._on_mask_polygon_added)
+            old.mask_cleared.disconnect(self._on_mask_cleared)
+        except Exception:
+            pass
+        self.viewer = new
+        new.pixel_hovered.connect(self._on_pixel_hovered)
+        new.zoom_changed.connect(self._on_zoom_changed)
+        new.roi_selected.connect(self._on_roi_selected)
+        new.line_profile_drawn.connect(self._on_line_profile_drawn)
+        new.annotation_placed.connect(self._on_annotation_placed)
+        new.measure_done.connect(self._on_measure_done)
+        new.mask_polygon_added.connect(self._on_mask_polygon_added)
+        new.mask_cleared.connect(self._on_mask_cleared)
+
     def _set_mode(self, mode: str):
         """Switch production workspaces without making users manage docks."""
         self._active_mode = mode
@@ -657,13 +811,11 @@ class MainWindow(QMainWindow):
                 self._update_ref_status()
                 self._refresh_focus_assist()
 
-        # Focus mode: grid on, heatmap off by default (F toggles heatmap, G toggles grid)
-        if mode == "Focus":
-            self.viewer.set_focus_grid_visible(True)
-            self.viewer.set_heatmap_visible(False)
-        else:
-            self.viewer.set_focus_grid_visible(False)
-            self.viewer.set_heatmap_visible(False)
+        # Apply overlay settings to ALL visible viewers
+        for i in range(self.multi_viewer.n_visible()):
+            v = self.multi_viewer.viewer_at(i)
+            v.set_focus_grid_visible(mode == "Focus")
+            v.set_heatmap_visible(False)
         if mode == "Focus":
             ref = getattr(self, "_focus_reference", None)
             if ref is None:
@@ -727,6 +879,9 @@ class MainWindow(QMainWindow):
         self.viewer.clear_tool_overlays()   # clear previous image's overlays
         self._load_annotations()            # restore saved annotations for this image
         self._load_mask()                   # restore saved mask for this image
+        # Store in active cell slot
+        self._cell_images[self.multi_viewer.active_idx] = data
+        self.multi_viewer.set_header(self.multi_viewer.active_idx, data.filename)
         self._display_current()
         self._update_ref_status()
         self._run_analysis()
@@ -820,6 +975,20 @@ class MainWindow(QMainWindow):
         heatmap_rgb = self.focus_engine.heatmap_to_rgb(focus_result.heatmap)
         self.viewer.set_heatmap(heatmap_rgb)
         self.viewer.set_focus_grid(focus_result.grid)
+        # Ensure grid/heatmap visibility matches current mode for this viewer
+        if self._active_mode == "Focus":
+            self.viewer.set_focus_grid_visible(True)
+
+        # Update active cell header badge with score
+        verdict_sym = {"SHARP": "🟢", "SOFT": "🟡", "BLURRY": "🔴"}.get(
+            focus_result.verdict, ""
+        )
+        badge = f"{verdict_sym} F:{focus_result.score:.0f}  Q:{quality_result.overall_score:.0f}"
+        self.multi_viewer.set_header(
+            self.multi_viewer.active_idx,
+            self.current_image.filename,
+            badge,
+        )
 
         # Status bar: color-coded verdict
         self._update_status_verdict(focus_result, quality_result)
@@ -847,6 +1016,19 @@ class MainWindow(QMainWindow):
             self._status_zoom.setText(f"  {pct:.0f}%  ")
         else:
             self._status_zoom.setText(f"  {pct:.1f}%  ")
+
+    def _on_view_state_changed(self, source_idx: int, zoom: float, ox: float, oy: float):
+        """Viewer pan/zoom changed — sync other panels if sync is enabled."""
+        n = self.multi_viewer.n_visible()
+        if n < 2 or not self._btn_sync_zoom.isChecked():
+            return
+        for i in range(n):
+            if i != source_idx:
+                v = self.multi_viewer.viewer_at(i)
+                v.blockSignals(True)
+                v.set_view_state(zoom, ox, oy)
+                v.blockSignals(False)
+                self.multi_viewer.update_cell_zoom(i, zoom)
 
     def _update_status_verdict(self, focus_result, quality_result):
         f = focus_result
@@ -1100,6 +1282,18 @@ class MainWindow(QMainWindow):
     #  Mask System
     # ═══════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _polygons_to_rects(polygons: list) -> list:
+        """Convert 4-corner polygon data (MaskData format) back to (ix1,iy1,ix2,iy2) tuples."""
+        rects = []
+        for poly in polygons:
+            if not poly:
+                continue
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            rects.append((min(xs), min(ys), max(xs), max(ys)))
+        return rects
+
     def _mask_path(self, image_path: str = None) -> str:
         p = image_path or (self.current_image.path or "")
         return p + ".mask.json" if p else ""
@@ -1124,9 +1318,11 @@ class MainWindow(QMainWindow):
             self.viewer.set_mask_polygons(mask.polygons)
             self.inspector.update_mask_status(mask)
         except FileNotFoundError:
-            # No mask file for this image — check if we should auto-align from previous
+            # No mask file — if we have a mask from a previous image (fixed camera),
+            # carry it forward as-is (same camera position assumed)
             if self._mask_data is not None and self.current_image.is_loaded():
-                self._mask_auto_align()
+                self.viewer.set_mask_polygons(self._mask_data.polygons)
+                self.inspector.update_mask_status(self._mask_data)
             else:
                 self._mask_data = None
                 self.viewer.set_mask_polygons([])
@@ -1134,33 +1330,136 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _on_mask_polygon_added(self, poly: list):
-        """New polygon closed by user — add to MaskData and re-analyze."""
+    def _on_mask_polygon_added(self, polygon: list):
+        """New mask polygon closed — add to MaskData and re-analyze."""
         from src.analysis.mask_engine import MaskData
         H, W = self.current_image.raw.shape[:2] if self.current_image.is_loaded() else (0, 0)
         if self._mask_data is None:
             self._mask_data = MaskData(
-                polygons     = [poly],
+                polygons     = [polygon],
                 image_shape  = (H, W),
                 source_image = self.current_image.filename,
             )
         else:
-            self._mask_data.polygons.append(poly)
+            self._mask_data.polygons.append(polygon)
             self._mask_data.image_shape  = (H, W)
             self._mask_data.source_image = self.current_image.filename
-        self._save_mask()
+        # auto-save removed — user must click Save Mask
         self.inspector.update_mask_status(self._mask_data)
         self._run_analysis()
         pct = self._mask_data.coverage_pct()
         self._status_main.setText(
-            f"  Mask polygon added — {len(self._mask_data.polygons)} region(s) "
-            f"covering {pct:.1f}% of image"
+            f"  Mask region added — {len(self._mask_data.polygons)} excluded region(s), "
+            f"{pct:.1f}% of image excluded"
         )
+
+    def _mask_save_dialog(self):
+        """Ask user HOW to save the mask — position only, or also export masked image."""
+        if self._mask_data is None or not self._mask_data.polygons:
+            QMessageBox.information(self, "Save Mask",
+                                    "No mask is active. Draw a mask first.")
+            return
+        if not self.current_image.is_loaded():
+            QMessageBox.information(self, "Save Mask", "No image loaded.")
+            return
+
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Save Mask")
+        dlg.setStyleSheet("background:#0C1520; color:#AABBCC;")
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(12)
+        lay.setContentsMargins(20, 16, 20, 16)
+
+        info = QLabel(
+            f"Image: <b>{self.current_image.filename}</b><br>"
+            f"Excluded regions: {len(self._mask_data.polygons)}<br>"
+            f"Excluded area: {self._mask_data.coverage_pct():.1f}% of image"
+        )
+        info.setStyleSheet("color:#AABBCC; font-size:11px;")
+        info.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(info)
+
+        cb_position = QCheckBox("Save mask position  (.mask.json)")
+        cb_position.setChecked(True)
+        cb_position.setToolTip(
+            "Saves the polygon positions alongside the image file.\n"
+            "Next time you open this image the mask reloads automatically."
+        )
+        cb_position.setStyleSheet("color:#AACCFF; font-size:11px;")
+        lay.addWidget(cb_position)
+
+        cb_image = QCheckBox("Export masked image  (excluded area = black pixels)")
+        cb_image.setChecked(False)
+        cb_image.setToolTip(
+            "Saves a new PNG file with the excluded region replaced by black pixels.\n"
+            "Saved as:  original_name_masked.png"
+        )
+        cb_image.setStyleSheet("color:#AACCFF; font-size:11px;")
+        lay.addWidget(cb_image)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        saved = []
+        if cb_position.isChecked():
+            self._save_mask()
+            saved.append("mask position (.mask.json)")
+        if cb_image.isChecked():
+            out_path = self._mask_save_image()
+            if out_path:
+                saved.append(f"masked image → {os.path.basename(out_path)}")
+
+        if saved:
+            self._status_main.setText("  Saved: " + "  +  ".join(saved))
+        else:
+            self._status_main.setText("  Nothing saved.")
+
+    def _mask_save_image(self) -> str:
+        """Export current image with excluded (masked) pixels set to black. Returns output path."""
+        if not self.current_image.is_loaded() or self._mask_data is None:
+            return ""
+        img = self.current_image.raw.copy()
+        H, W = img.shape[:2]
+        mask_arr = self._mask_data.to_array((H, W))   # 1=valid, 0=excluded
+
+        # Black out excluded pixels
+        if img.ndim == 3:
+            img[mask_arr == 0] = 0
+        else:
+            img[mask_arr == 0] = 0
+
+        # Build output path: same folder, _masked suffix, always PNG
+        base, _ = os.path.splitext(self.current_image.path)
+        out_path = base + "_masked.png"
+
+        # If file exists, add counter
+        counter = 1
+        while os.path.exists(out_path):
+            out_path = base + f"_masked_{counter}.png"
+            counter += 1
+
+        # Save — cv2 expects BGR
+        if img.ndim == 3:
+            save_img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        else:
+            save_img = img
+        cv2.imwrite(out_path, save_img)
+        return out_path
 
     def _on_mask_cleared(self):
         self._mask_data = None
         self.inspector.update_mask_status(None)
-        self._save_mask()   # removes file
+        self._save_mask()   # removes file — intentional on clear
         self._run_analysis()
 
     def _mask_clear(self):
@@ -1173,6 +1472,48 @@ class MainWindow(QMainWindow):
                 _os.remove(p)
             except Exception:
                 pass
+
+    def _mask_find_all_similar(self):
+        """
+        Take the FIRST drawn polygon as a template and find all identical
+        regions in the current image. Replaces the mask with all found regions.
+        """
+        if not self.current_image.is_loaded():
+            return
+        if self._mask_data is None or not self._mask_data.polygons:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Find All Similar",
+                "Draw a mask around ONE example region first,\n"
+                "then click 'Find All Similar'."
+            )
+            return
+
+        from src.analysis.mask_engine import MaskEngine, MaskData
+        template_poly = self._mask_data.polygons[0]   # use first drawn polygon
+        self._status_main.setText("  Searching for similar regions…")
+
+        try:
+            found = MaskEngine.find_similar_regions(
+                self.current_image.raw, template_poly
+            )
+        except Exception as e:
+            self._status_main.setText(f"  Find similar failed: {e}")
+            return
+
+        H, W = self.current_image.raw.shape[:2]
+        self._mask_data = MaskData(
+            polygons     = found,
+            image_shape  = (H, W),
+            source_image = self.current_image.filename,
+        )
+        self.viewer.set_mask_polygons(found)
+        self.inspector.update_mask_status(self._mask_data)
+        # auto-save removed — user must click Save Mask
+        self._run_analysis()
+        self._status_main.setText(
+            f"  Found {len(found)} similar region(s) — all masked"
+        )
 
     def _mask_auto_detect(self):
         """Phase 2: Auto-detect specular reflections and suggest inspection mask."""
@@ -1194,7 +1535,7 @@ class MainWindow(QMainWindow):
         self._mask_data = mask
         self.viewer.set_mask_polygons(mask.polygons)
         self.inspector.update_mask_status(mask)
-        self._save_mask()
+        # auto-save removed — user must click Save Mask
         self._run_analysis()
         pct = mask.coverage_pct()
         self._status_main.setText(
@@ -1203,7 +1544,7 @@ class MainWindow(QMainWindow):
         )
 
     def _mask_auto_align(self):
-        """Phase 3: Auto-align the existing mask to the current image using ECC."""
+        """Phase 3: Auto-align mask using ORB feature matching + RANSAC."""
         if self._mask_data is None or not self.current_image.is_loaded():
             return
         from src.analysis.mask_engine import MaskEngine
@@ -1217,6 +1558,7 @@ class MainWindow(QMainWindow):
             )
         if not ref_path or not __import__("os").path.exists(ref_path):
             # Cannot load reference — use mask as-is (fixed camera assumption)
+            self.viewer.set_mask_polygons(self._mask_data.polygons)
             self._status_main.setText(
                 f"  Mask from {ref_src} applied directly (reference not found for alignment)"
             )
@@ -1235,24 +1577,27 @@ class MainWindow(QMainWindow):
                 "MEDIUM" if confidence >= 50 else "LOW"
             )
 
+            n_inliers  = getattr(aligned, "n_match_inliers", 0)
+            conf_label = ("HIGH" if confidence >= 80 else
+                          "MEDIUM" if confidence >= 50 else "LOW")
+
             if confidence >= 50:
-                # Apply automatically — but show confidence to user
                 self._mask_data = aligned
                 self.viewer.set_mask_polygons(aligned.polygons)
                 self.inspector.update_mask_status(aligned)
-                self._save_mask()
+                # auto-save removed
                 self._run_analysis()
                 self._status_main.setText(
-                    f"  Mask auto-aligned from {ref_src} — "
+                    f"  Mask aligned — {n_inliers} feature matches, "
                     f"confidence: {confidence:.0f}% ({conf_label})"
                 )
             else:
-                # Low confidence — ask user
                 from PyQt6.QtWidgets import QMessageBox
                 btn = QMessageBox.question(
                     self, "Mask Alignment — Low Confidence",
-                    f"Mask alignment confidence is LOW ({confidence:.0f}%).\n\n"
-                    f"The part may have moved significantly or the image is very different.\n\n"
+                    f"Only {n_inliers} matching features found "
+                    f"(confidence: {confidence:.0f}%).\n\n"
+                    f"The images may be very different or the part moved a lot.\n\n"
                     f"Apply the aligned mask anyway?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 )
@@ -1260,14 +1605,16 @@ class MainWindow(QMainWindow):
                     self._mask_data = aligned
                     self.viewer.set_mask_polygons(aligned.polygons)
                     self.inspector.update_mask_status(aligned)
-                    self._save_mask()
+                    # auto-save removed
                     self._run_analysis()
                 else:
                     self._mask_data = None
                     self.viewer.set_mask_polygons([])
                     self.inspector.update_mask_status(None)
+        except RuntimeError as e:
+            self._status_main.setText(f"  Feature matching failed: {e}")
         except Exception as e:
-            self._status_main.setText(f"  Mask alignment failed: {e}")
+            self._status_main.setText(f"  Mask alignment error: {e}")
 
     def _mask_apply_to_folder(self):
         """Apply current mask to all images in the folder (with auto-alignment)."""
@@ -1640,8 +1987,35 @@ class MainWindow(QMainWindow):
     # ═══════════════════════════════════════════════════════════════
 
     def _restore_geometry(self):
-        self.showMaximized()   # always start maximized — full screen layout
-        # Dock sizes set after show so Qt has real pixel dimensions
+        primary = QApplication.primaryScreen()
+        ag = primary.availableGeometry()   # excludes taskbar
+
+        w = self.config.window_width
+        h = self.config.window_height
+
+        if self.config.window_x == -1:
+            # First launch — centre on primary monitor at a comfortable size
+            w = min(w, int(ag.width()  * 0.80))
+            h = min(h, int(ag.height() * 0.80))
+            x = ag.x() + (ag.width()  - w) // 2
+            y = ag.y() + (ag.height() - h) // 2
+        else:
+            x = self.config.window_x
+            y = self.config.window_y
+            # Guard: make sure it's still on a visible screen
+            visible = any(
+                s.availableGeometry().contains(x + w // 2, y + h // 2)
+                for s in QApplication.screens()
+            )
+            if not visible:
+                x = ag.x() + (ag.width()  - w) // 2
+                y = ag.y() + (ag.height() - h) // 2
+
+        self.setGeometry(x, y, w, h)
+        if self.config.window_maximized:
+            self.showMaximized()
+        else:
+            self.show()
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(100, self._set_dock_sizes)
 
@@ -1673,8 +2047,11 @@ class MainWindow(QMainWindow):
         if self._analysis_worker and self._analysis_worker.isRunning():
             self._analysis_worker.quit()
             self._analysis_worker.wait()
-        self.config.window_width     = self.width()
-        self.config.window_height    = self.height()
+        if not self.isMaximized():
+            self.config.window_width  = self.width()
+            self.config.window_height = self.height()
+            self.config.window_x      = self.x()
+            self.config.window_y      = self.y()
         self.config.window_maximized = self.isMaximized()
         self.config.save()
         super().closeEvent(event)
