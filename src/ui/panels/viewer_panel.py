@@ -31,7 +31,7 @@ class ViewerPanel(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(400, 300)
+        self.setMinimumSize(80, 60)
         self.setStyleSheet("background-color: #1a1a1a;")
 
         self._focus_engine = FocusEngine()

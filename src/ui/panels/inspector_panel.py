@@ -42,8 +42,8 @@ class InspectorPanel(QScrollArea):
     def __init__(self):
         super().__init__()
         self.setWidgetResizable(True)
-        self.setMinimumWidth(240)
-        self.setMaximumWidth(310)
+        self.setMinimumWidth(160)
+        self.setMaximumWidth(340)
 
         container = QWidget()
         self._layout = QVBoxLayout(container)
