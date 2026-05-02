@@ -83,19 +83,21 @@ def _classify_severity(area: int) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AnalysisWorker(QThread):
-    """Runs the full diff + defect detection pipeline off the main thread."""
+    """Runs ALL display computation off the main thread (diff, blend, signed)."""
 
     done = pyqtSignal(
-        np.ndarray,   # diff_rgb   — colormap image for display
-        np.ndarray,   # annot_rgb  — diff + bounding boxes drawn
+        np.ndarray,   # display image for diff viewer
+        np.ndarray,   # annotated image (boxes drawn); same as display for non-diff
         dict,         # metrics
         list,         # defects (List[Defect])
     )
 
-    def __init__(self, img_a, img_b, threshold: int, min_area: int, amp: int):
+    def __init__(self, img_a, img_b, mode: str,
+                 threshold: int, min_area: int, amp: int):
         super().__init__()
         self._a         = img_a
         self._b         = img_b
+        self._mode      = mode
         self._threshold = threshold
         self._min_area  = min_area
         self._amp       = amp
@@ -120,6 +122,31 @@ class AnalysisWorker(QThread):
             if a.shape != b.shape:
                 b = cv2.resize(b, (a.shape[1], a.shape[0]),
                                interpolation=cv2.INTER_LINEAR)
+
+            # ── Blend / Signed: compute and return immediately ────────────
+            if self._mode == "Blend 50/50":
+                ra = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB) if a.ndim == 2 else a
+                rb = cv2.cvtColor(b, cv2.COLOR_GRAY2RGB) if b.ndim == 2 else b
+                out = cv2.addWeighted(ra, 0.5, rb, 0.5, 0)
+                empty_metrics = {"pixel_diff": 0, "max_dev": 0, "mean_dev": 0,
+                                 "ssim": None, "psnr": None, "n_defects": 0,
+                                 "auto_norm": False, "verdict": "—"}
+                self.done.emit(out, out, empty_metrics, [])
+                return
+
+            if self._mode == "Signed ±128":
+                ag2 = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY) if a.ndim == 3 else a
+                bg2 = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY) if b.ndim == 3 else b
+                signed = np.clip(
+                    ag2.astype(np.int16) - bg2.astype(np.int16) + 128, 0, 255
+                ).astype(np.uint8)
+                bgr = cv2.applyColorMap(signed, cv2.COLORMAP_COOLWARM)
+                out = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                empty_metrics = {"pixel_diff": 0, "max_dev": 0, "mean_dev": 0,
+                                 "ssim": None, "psnr": None, "n_defects": 0,
+                                 "auto_norm": False, "verdict": "—"}
+                self.done.emit(out, out, empty_metrics, [])
+                return
 
             ag = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY) if a.ndim == 3 else a
             bg = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY) if b.ndim == 3 else b
@@ -934,11 +961,7 @@ class ComparisonPanel(QWidget):
 
     def _trigger(self):
         """Called on every slider/mode change — debounced to avoid flooding."""
-        mode = self._mode.currentText()
-        if mode == "Flicker":
-            return
-        if mode == "Blend 50/50":
-            self._show_blend()
+        if self._mode.currentText() == "Flicker":
             return
         self._debounce.start()   # resets the 300 ms countdown each call
 
@@ -948,12 +971,16 @@ class ComparisonPanel(QWidget):
             return
 
         if self._worker and self._worker.isRunning():
-            self._worker.done.disconnect()   # discard stale result
-            self._worker.quit()
-            self._worker.wait(200)           # brief wait; worker is fast
+            try:
+                self._worker.done.disconnect()
+            except RuntimeError:
+                pass
+            self._worker.quit()   # no wait — let it die on its own
 
+        mode = self._mode.currentText()
         self._worker = AnalysisWorker(
             self._img_a, self._img_b,
+            mode=mode,
             threshold=self._thr_slider.value(),
             min_area=self._ma_slider.value(),
             amp=self._amp_slider.value(),
@@ -961,13 +988,29 @@ class ComparisonPanel(QWidget):
         self._worker.done.connect(self._on_done)
         self._worker.start()
 
-    def _on_done(self, diff_rgb, annot_rgb, metrics: dict, defects: list):
+    def _on_done(self, display_img, annot_rgb, metrics: dict, defects: list):
         mode = self._mode.currentText()
+        self._diff_viewer.set_image(annot_rgb)
+
+        if mode == "Blend 50/50":
+            self._diff_hdr.setText("  BLEND   ·   50% A + 50% B")
+            self._diff_hdr.setStyleSheet(
+                "background:#101010; color:#5588AA; padding:3px 8px; font-size:10px;"
+            )
+            self._set_verdict_neutral()
+            self._defect_list.show_defects([])
+            return
 
         if mode == "Signed ±128":
-            self._show_signed()
-        else:
-            self._diff_viewer.set_image(annot_rgb)
+            self._diff_hdr.setText(
+                "  SIGNED ±128   ·   blue = A darker   ·   red = A brighter   ·   gray = identical"
+            )
+            self._diff_hdr.setStyleSheet(
+                "background:#101010; color:#5588AA; padding:3px 8px; font-size:10px;"
+            )
+            self._set_verdict_neutral()
+            self._defect_list.show_defects([])
+            return
 
         note = "⚡ auto-normalized" if metrics.get("auto_norm") else \
                f"amp ×{self._amp_slider.value()}"
@@ -980,45 +1023,8 @@ class ComparisonPanel(QWidget):
             "background:#101A10; color:#44AA44; padding:3px 8px; "
             "font-size:10px; font-weight:700;"
         )
-
         self._set_verdict(metrics["verdict"], metrics, defects)
         self._defect_list.show_defects(defects)
-
-    # ── Display modes ─────────────────────────────────────────────────────────
-
-    def _show_blend(self):
-        if self._img_a is None or self._img_b is None:
-            return
-        a = self._to8(self._img_a)
-        b = self._to8(self._img_b)
-        if a.ndim == 2: a = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
-        if b.ndim == 2: b = cv2.cvtColor(b, cv2.COLOR_GRAY2RGB)
-        if a.shape != b.shape:
-            b = cv2.resize(b, (a.shape[1], a.shape[0]))
-        blend = cv2.addWeighted(a, 0.5, b, 0.5, 0)
-        self._diff_viewer.set_image(blend)
-        self._diff_hdr.setText("  BLEND   ·   50% A + 50% B")
-
-    def _show_signed(self):
-        if self._img_a is None or self._img_b is None:
-            return
-        a = self._to8(self._img_a)
-        b = self._to8(self._img_b)
-        if a.ndim == 3: a = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY)
-        if b.ndim == 3: b = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY)
-        if a.shape != b.shape:
-            b = cv2.resize(b, (a.shape[1], a.shape[0]))
-        # Signed diff centered at 128
-        signed = np.clip(
-            a.astype(np.int16) - b.astype(np.int16) + 128, 0, 255
-        ).astype(np.uint8)
-        # Diverging colormap: blue(dark)=A darker, gray=same, red=A brighter
-        bgr = cv2.applyColorMap(signed, cv2.COLORMAP_COOLWARM)
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        self._diff_viewer.set_image(rgb)
-        self._diff_hdr.setText(
-            "  SIGNED ±128   ·   blue = A darker   ·   red = A brighter   ·   gray = identical"
-        )
 
     def _on_mode_changed(self, mode: str):
         if mode == "Flicker":
