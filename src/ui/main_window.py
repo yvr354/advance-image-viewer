@@ -614,17 +614,14 @@ class MainWindow(QMainWindow):
                 lambda zoom, ox, oy, _i=idx: self._on_view_state_changed(_i, zoom, ox, oy)
             )
 
-        # Browser → open image
-        self.browser.image_selected.connect(self.open_image)
+        # Browser → open image (or load into compare panel if in Compare mode)
+        self.browser.image_selected.connect(self._on_browser_image_selected)
 
         # Pipeline → re-process and update viewer + 3D
         self.pipeline_panel.pipeline_changed.connect(self._on_pipeline_changed)
 
         # Fusion → send composite to viewer
         self.fusion_panel.composite_ready.connect(self._on_composite_ready)
-
-        # Comparison panel → open image in main viewer
-        self.comparison_panel.open_image_requested.connect(self.open_image)
 
         # Inspection tool signals → inspector panel updates
         self.viewer.roi_selected.connect(self._on_roi_selected)
@@ -1925,9 +1922,17 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(50, self._set_dock_sizes)
 
     def _add_to_comparison(self):
+        """Send current image to comparison panel active slot."""
         if self.current_image.path:
-            self.comparison_panel.add_image_from_path(self.current_image.path)
             self._set_mode("Compare")
+            self.comparison_panel.load_path(self.current_image.path)
+
+    def _on_browser_image_selected(self, path: str):
+        """Browser image clicked — load into compare slot or open normally."""
+        if self._active_mode == "Compare":
+            self.comparison_panel.load_path(path)
+        else:
+            self.open_image(path)
 
     def _export_csv(self):
         if not self.current_image.is_loaded() or self._last_focus_result is None:

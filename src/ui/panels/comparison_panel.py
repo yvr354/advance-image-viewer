@@ -1,21 +1,25 @@
 """
-Image Comparison Panel — Task 4
-
-Load multiple images of the same scene (different formats, exposures,
-camera settings) and instantly rank them by objective quality metrics.
-
-Use cases:
-  - Compare TIFF vs PNG vs JPEG — see compression quality loss
-  - Compare 10 captures of same part — find sharpest
-  - Compare exposure settings — find optimal exposure
-  - Compare different gain values — find best SNR
+Professional A/B Image Comparison Panel.
 
 Layout:
-  Top    — toolbar (load, clear, export best)
-  Middle — scrollable card grid, one card per image
-           each card: thumbnail + all metrics + rank badge
-  Bottom — side-by-side viewer of any two selected images
-           with difference overlay option
+  ┌─ Header bar ──────────────────────────────────────────────────────────┐
+  │  [A: filename  W×H]  [B: filename  W×H]  [⇄ Swap]  Amp──●──  Mode▼  │
+  ├─ Metrics bar ─────────────────────────────────────────────────────────┤
+  │  SSIM: 0.947  PSNR: 38.2 dB  Diff: 1.8%  Max Δ: 43  ✓ PASS          │
+  ├─────────────────────┬─────────────────────┬───────────────────────────┤
+  │                     │                     │                           │
+  │   REFERENCE  (A)    │   TEST  (B)         │   DIFF MAP                │
+  │                     │                     │   red = changed           │
+  ├─────────────────────┴─────────────────────┴───────────────────────────┤
+  │  Pixel Loupe:  [A patch]  ΔR/G/B  [B patch]    X: 1024  Y: 768       │
+  └───────────────────────────────────────────────────────────────────────┘
+
+Usage:
+  • Click panel A or B header to activate it (bright blue border).
+  • Then click any image in the File Browser — it loads into the active panel.
+  • Or drag an image file directly onto A or B.
+  • Zoom/pan any panel — all three stay in sync.
+  • Hover anywhere — pixel loupe shows both A and B at that position.
 """
 
 import os
@@ -23,13 +27,12 @@ import cv2
 import numpy as np
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QPushButton, QLabel, QGridLayout, QFrame,
-    QFileDialog, QComboBox, QCheckBox, QSizePolicy,
-    QSplitter, QGroupBox, QProgressBar,
+    QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QPushButton, QLabel, QSlider, QComboBox,
+    QFileDialog, QSizePolicy, QFrame,
 )
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QImage, QFont, QColor
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap, QFont, QDragEnterEvent, QDropEvent
 
 try:
     from skimage.metrics import structural_similarity, peak_signal_noise_ratio
@@ -37,902 +40,724 @@ try:
 except ImportError:
     _SKIMAGE = False
 
-from src.core.image_loader import load_image, is_supported
+from src.core.image_loader import load_image
 from src.ui.panels.gl_viewer import GLImageViewer
-from src.analysis.focus_engine import FocusEngine
-from src.analysis.quality_engine import QualityEngine
-from src.ui.theme import (
-    COLOR_PERFECT, COLOR_GOOD, COLOR_WARN, COLOR_FAIL,
-    BG_RAISED, BG_CONTROL, ACCENT, TEXT_PRIMARY, TEXT_SECONDARY,
-)
+from src.ui.theme import ACCENT, TEXT_PRIMARY, TEXT_SECONDARY, BG_RAISED, BG_CONTROL
 
 
-# ── Background worker — analyze one image ──────────────────────────────────
+# ── Background diff / metrics worker ──────────────────────────────────────
 
-class ImageAnalyzeWorker(QThread):
-    result_ready = pyqtSignal(str, object, object)   # path, focus_result, quality_result
+class DiffWorker(QThread):
+    """Computes diff image + metrics off the main thread."""
+    done = pyqtSignal(np.ndarray, dict, bool)   # diff_rgb, metrics, auto_normalized
 
-    def __init__(self, path: str, focus: FocusEngine, quality: QualityEngine):
+    def __init__(self, img_a: np.ndarray, img_b: np.ndarray, amp: float):
         super().__init__()
-        self._path    = path
-        self._focus   = focus
-        self._quality = quality
+        self._a   = img_a
+        self._b   = img_b
+        self._amp = amp
 
     def run(self):
         try:
-            data  = load_image(self._path)
-            fr    = self._focus.analyze(data.raw)
-            qr    = self._quality.analyze(data.raw)
-            self.result_ready.emit(self._path, fr, qr)
+            a, b = self._normalise(self._a), self._normalise(self._b)
+
+            # Resize B to A's size if different
+            if a.shape != b.shape:
+                b = cv2.resize(b, (a.shape[1], a.shape[0]),
+                               interpolation=cv2.INTER_LINEAR)
+
+            ag = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY) if a.ndim == 3 else a
+            bg = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY) if b.ndim == 3 else b
+
+            # Raw absolute difference
+            diff_raw = cv2.absdiff(ag.astype(np.int16), bg.astype(np.int16))
+            diff_raw = diff_raw.astype(np.float32)
+
+            # Display: amplify then auto-normalize so even tiny diffs are visible.
+            # If max after amplification < 32, stretch to full range automatically.
+            amplified = diff_raw * self._amp
+            amp_max   = float(np.max(amplified))
+            if amp_max < 32 and amp_max > 0:
+                # Auto-stretch: tiny differences (e.g. JPEG artifacts of 3-4 px)
+                # become fully visible instead of invisible near-black
+                amplified = amplified * (255.0 / amp_max)
+            amp_clipped = np.clip(amplified, 0, 255).astype(np.uint8)
+            diff_color  = cv2.applyColorMap(amp_clipped, cv2.COLORMAP_HOT)
+            diff_rgb    = cv2.cvtColor(diff_color, cv2.COLOR_BGR2RGB)
+
+            # Metrics
+            n        = ag.size
+            nonzero  = float(np.count_nonzero(diff_raw > 5)) / n * 100
+            max_dev  = int(np.max(diff_raw))
+            mean_dev = float(np.mean(diff_raw))
+
+            metrics = {
+                "pixel_diff": nonzero,
+                "max_dev":    max_dev,
+                "mean_dev":   mean_dev,
+                "ssim":       None,
+                "psnr":       None,
+                "verdict":    "PASS" if nonzero < 2.0 else "FAIL",
+            }
+
+            if _SKIMAGE:
+                try:
+                    metrics["ssim"] = float(structural_similarity(ag, bg, data_range=255))
+                    metrics["psnr"] = float(peak_signal_noise_ratio(ag, bg, data_range=255))
+                    metrics["verdict"] = "PASS" if metrics["ssim"] >= 0.92 else "FAIL"
+                except Exception:
+                    pass
+
+            self.done.emit(diff_rgb, metrics, amp_max < 32 and amp_max > 0)
         except Exception:
             pass
 
+    @staticmethod
+    def _normalise(img: np.ndarray) -> np.ndarray:
+        if img.dtype == np.uint16:
+            return (img >> 8).astype(np.uint8)
+        if img.dtype != np.uint8:
+            return cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return img
 
-# ── Single image card ──────────────────────────────────────────────────────
 
-class ImageCard(QFrame):
-    selected    = pyqtSignal(object)   # emits self
-    compare_req = pyqtSignal(object)   # emits self — add to compare slot
+# ── Slot panel (A or B) ───────────────────────────────────────────────────
 
-    THUMB_SIZE = 120
+class SlotPanel(QWidget):
+    """One viewer slot — header bar + GLImageViewer. Emits activated on click."""
 
-    def __init__(self, path: str, parent=None):
+    activated = pyqtSignal(str)   # 'A' or 'B'
+    load_requested = pyqtSignal(str, str)   # slot, path (from drag-drop)
+
+    _ACTIVE_HDR   = "background:#0E2438; color:#00AAFF; padding:4px 8px; font-weight:700; font-size:10px;"
+    _INACTIVE_HDR = "background:#0A1520; color:#445566; padding:4px 8px; font-size:10px;"
+    _ACTIVE_BORDER   = "QWidget#SlotPanel { border: 2px solid #00AAFF; }"
+    _INACTIVE_BORDER = "QWidget#SlotPanel { border: 2px solid #1A2535; }"
+
+    def __init__(self, slot: str, parent=None):
         super().__init__(parent)
-        self.path          = path
-        self.focus_result  = None
-        self.quality_result= None
-        self.rank          = 0
-        self._selected     = False
-
-        self.setFixedWidth(160)
-        self.setMinimumHeight(280)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet(f"""
-            QFrame {{
-                background: {BG_RAISED};
-                border: 1px solid #252535;
-                border-radius: 6px;
-            }}
-            QFrame:hover {{
-                border-color: {ACCENT};
-            }}
-        """)
+        self.slot    = slot      # 'A' or 'B'
+        self._active = False
+        self._path   = ""
+        self._w = self._h = 0
+        self.setObjectName("SlotPanel")
+        self.setAcceptDrops(True)
         self._build()
-        self._load_thumb()
 
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
 
-        # Rank badge
-        self._rank_label = QLabel("")
-        self._rank_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._rank_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._rank_label.setFixedHeight(18)
-        layout.addWidget(self._rank_label)
+        # Header click area
+        self._header = QLabel(self._default_text())
+        self._header.setFixedHeight(26)
+        self._header.setStyleSheet(self._INACTIVE_HDR)
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header.mousePressEvent = lambda _: self.activated.emit(self.slot)
+        lay.addWidget(self._header)
 
-        # Thumbnail
-        self._thumb = QLabel()
-        self._thumb.setFixedSize(self.THUMB_SIZE + 8, self.THUMB_SIZE + 8)
-        self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._thumb.setStyleSheet("background: #0A0A0F; border-radius: 3px;")
-        layout.addWidget(self._thumb, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # GL viewer
+        self.viewer = GLImageViewer()
+        self.viewer.setAcceptDrops(False)   # panel handles drops
+        orig = self.viewer.mousePressEvent
+        def _fwd(ev, _o=orig):
+            self.activated.emit(self.slot)
+            _o(ev)
+        self.viewer.mousePressEvent = _fwd
+        lay.addWidget(self.viewer, stretch=1)
 
-        # Filename
-        name = os.path.basename(self.path)
-        if len(name) > 18:
-            name = name[:8] + "…" + name[-7:]
-        self._name_label = QLabel(name)
-        self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._name_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 10px;")
-        self._name_label.setToolTip(self.path)
-        layout.addWidget(self._name_label)
+        self._set_active(False)
 
-        # Format + size
-        ext  = os.path.splitext(self.path)[1].upper().lstrip(".")
-        size = os.path.getsize(self.path) / 1024
-        self._meta_label = QLabel(f"{ext}  {size:.0f} KB")
-        self._meta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._meta_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
-        layout.addWidget(self._meta_label)
+    def _default_text(self):
+        label = "REFERENCE" if self.slot == "A" else "TEST"
+        return f"  {self.slot} — {label}   ·   click to activate, then pick image in browser"
 
-        # Metrics area
-        self._metrics_widget = QWidget()
-        ml = QVBoxLayout(self._metrics_widget)
-        ml.setContentsMargins(2, 2, 2, 2)
-        ml.setSpacing(2)
+    def set_active(self, active: bool):
+        self._active = active
+        self._set_active(active)
 
-        self._focus_row   = self._make_metric_row("Focus",   "—")
-        self._quality_row = self._make_metric_row("Quality", "—")
-        self._snr_row     = self._make_metric_row("SNR",     "—")
-        self._verdict_label = QLabel("Analyzing…")
-        self._verdict_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._verdict_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._verdict_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+    def _set_active(self, active: bool):
+        self._header.setStyleSheet(self._ACTIVE_HDR if active else self._INACTIVE_HDR)
+        self.setStyleSheet(self._ACTIVE_BORDER if active else self._INACTIVE_BORDER)
 
-        ml.addLayout(self._focus_row[0])
-        ml.addLayout(self._quality_row[0])
-        ml.addLayout(self._snr_row[0])
-        ml.addWidget(self._verdict_label)
-        layout.addWidget(self._metrics_widget)
+    def set_image(self, path: str, img: np.ndarray):
+        self._path = path
+        self._h, self._w = img.shape[:2]
+        self.viewer.set_image(img)
+        self._refresh_header()
 
-        # Compare button
-        self._cmp_btn = QPushButton("＋ Compare")
-        self._cmp_btn.setFixedHeight(22)
-        self._cmp_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {BG_CONTROL}; color: {ACCENT};
-                border: 1px solid {ACCENT}44; border-radius: 3px;
-                font-size: 10px;
-            }}
-            QPushButton:hover {{
-                background: {ACCENT}22; border-color: {ACCENT};
-            }}
-        """)
-        self._cmp_btn.clicked.connect(lambda: self.compare_req.emit(self))
-        layout.addWidget(self._cmp_btn)
+    def _refresh_header(self):
+        name = os.path.basename(self._path)
+        if len(name) > 28:
+            name = name[:14] + "…" + name[-12:]
+        label = "REFERENCE" if self.slot == "A" else "TEST"
+        self._header.setText(
+            f"  {self.slot} — {label}   ·   {name}   {self._w}×{self._h} px"
+        )
 
-        layout.addStretch()
+    def update_zoom(self, zoom: float):
+        if not self._path:
+            return
+        name = os.path.basename(self._path)
+        if len(name) > 28:
+            name = name[:14] + "…" + name[-12:]
+        label = "REFERENCE" if self.slot == "A" else "TEST"
+        pct   = f"{zoom*100:.0f}%"
+        self._header.setText(
+            f"  {self.slot} — {label}   ·   {name}   {self._w}×{self._h} px   {pct}"
+        )
 
-    def _make_metric_row(self, label: str, value: str):
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel(label)
-        lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
-        lbl.setFixedWidth(45)
-        val = QLabel(value)
-        val.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 9px; font-weight: 600;")
-        val.setAlignment(Qt.AlignmentFlag.AlignRight)
-        row.addWidget(lbl)
-        row.addWidget(val)
-        return row, val
+    # Drag-drop
+    def dragEnterEvent(self, e: QDragEnterEvent):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
 
-    def _load_thumb(self):
-        try:
-            img = cv2.imread(self.path, cv2.IMREAD_REDUCED_COLOR_4)
-            if img is None:
-                img = cv2.imread(self.path)
-            if img is None:
-                return
-            h, w = img.shape[:2]
-            scale = self.THUMB_SIZE / max(h, w)
-            img   = cv2.resize(img, (int(w*scale), int(h*scale)))
-            rgb   = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            qimg  = QImage(rgb.data, rgb.shape[1], rgb.shape[0],
-                           rgb.shape[1]*3, QImage.Format.Format_RGB888)
-            self._thumb.setPixmap(QPixmap.fromImage(qimg.copy()))
-        except Exception:
-            pass
-
-    def set_results(self, focus_result, quality_result):
-        self.focus_result   = focus_result
-        self.quality_result = quality_result
-
-        f  = focus_result
-        q  = quality_result
-
-        # Color maps
-        fc = COLOR_PERFECT if f.score >= 700 else COLOR_GOOD if f.score >= 400 else COLOR_WARN if f.score >= 200 else COLOR_FAIL
-        qc = COLOR_PERFECT if q.verdict == "PASS" else COLOR_FAIL
-
-        self._focus_row[1].setText(f"{f.score:.0f}")
-        self._focus_row[1].setStyleSheet(f"color: {fc}; font-size: 9px; font-weight: 700;")
-
-        self._quality_row[1].setText(f"{q.overall_score:.0f}/100")
-        self._quality_row[1].setStyleSheet(f"color: {qc}; font-size: 9px; font-weight: 700;")
-
-        self._snr_row[1].setText(f"{q.snr_db:.0f} dB")
-
-        verdict = f"{f.verdict} · {q.verdict}"
-        self._verdict_label.setText(verdict)
-        self._verdict_label.setStyleSheet(f"color: {fc}; font-size: 9px; font-weight: 700;")
-
-    def set_rank(self, rank: int, total: int):
-        self.rank = rank
-        if rank == 1:
-            self._rank_label.setText("🥇  BEST")
-            self._rank_label.setStyleSheet(f"color: {COLOR_PERFECT}; font-size: 10px;")
-            self.setStyleSheet(self.styleSheet().replace(
-                "border: 1px solid #252535", f"border: 2px solid {COLOR_PERFECT}"
-            ))
-        elif rank == 2:
-            self._rank_label.setText(f"#{rank}")
-            self._rank_label.setStyleSheet(f"color: {COLOR_GOOD}; font-size: 10px;")
-        elif rank == total:
-            self._rank_label.setText(f"#{rank}  WORST")
-            self._rank_label.setStyleSheet(f"color: {COLOR_FAIL}; font-size: 10px;")
-        else:
-            self._rank_label.setText(f"#{rank}")
-            self._rank_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
-
-    def mousePressEvent(self, event):
-        self.selected.emit(self)
+    def dropEvent(self, e: QDropEvent):
+        for url in e.mimeData().urls():
+            path = url.toLocalFile()
+            if path:
+                self.activated.emit(self.slot)
+                self.load_requested.emit(self.slot, path)
+                break
 
 
-# ── Side-by-side comparison view ──────────────────────────────────────────
+# ── Diff panel ────────────────────────────────────────────────────────────
 
-class CompareView(QWidget):
-    """
-    Professional side-by-side comparison using two synchronized GL viewers.
-
-    Controls (in each viewer):
-      Left drag    — pan
-      Scroll wheel — zoom toward cursor
-      Right drag   — rubber-band zoom to region
-      Double-click — fit to window
-
-    Sync Zoom: when checked, zooming/panning one viewer mirrors the other
-    at the exact same image position — essential for comparing same-scene images.
-    """
+class DiffPanel(QWidget):
+    """Third panel — shows computed diff map."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._image_a: np.ndarray | None = None
-        self._image_b: np.ndarray | None = None
-        self._flicker_state = False
-        self._flicker_timer = QTimer()
-        self._flicker_timer.timeout.connect(self._flicker_tick)
+        self._amp = 4
         self._build()
 
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
 
-        # ── Toolbar ────────────────────────────────────────────────
-        toolbar = QHBoxLayout()
-
-        self._mode = QComboBox()
-        self._mode.addItems(["Side by Side", "Difference (A−B)", "Overlay Blend", "Flicker"])
-        self._mode.setToolTip(
-            "Side by Side  — synchronized GL viewers, same zoom/pan\n"
-            "Difference     — pixel diff amplified 8×, JET colormap\n"
-            "Overlay Blend — 50/50 alpha blend of A and B\n"
-            "Flicker        — alternates A/B every 500ms — eye catches changes"
+        self._header = QLabel("  DIFF MAP   ·   load both images to compute")
+        self._header.setFixedHeight(26)
+        self._header.setStyleSheet(
+            "background:#101A10; color:#336633; padding:4px 8px; font-size:10px;"
         )
-        self._mode.currentTextChanged.connect(self._on_mode_changed)
+        lay.addWidget(self._header)
 
-        self._swap_btn = QPushButton("⇄ Swap")
-        self._swap_btn.setFixedWidth(65)
-        self._swap_btn.clicked.connect(self._swap)
+        self.viewer = GLImageViewer()
+        lay.addWidget(self.viewer, stretch=1)
 
-        self._sync_chk = QCheckBox("Sync Zoom")
-        self._sync_chk.setChecked(True)
-        self._sync_chk.setToolTip(
-            "When enabled: zooming or panning image A automatically mirrors\n"
-            "the same region in image B — compare exact same pixel position."
+    def set_diff(self, diff_rgb: np.ndarray, amp: int, auto_normalized: bool = False):
+        self._amp = amp
+        self.viewer.set_image(diff_rgb)
+        note = "  ⚡ auto-normalized (differences are very small)" if auto_normalized else f"  amplify ×{amp}"
+        self._header.setText(f"  DIFF MAP   ·   hot = changed  · {note}")
+        self._header.setStyleSheet(
+            "background:#101A10; color:#44AA44; padding:4px 8px; "
+            "font-size:10px; font-weight:700;"
         )
 
-        self._label_a = QLabel("A: —")
-        self._label_b = QLabel("B: —")
-        for lbl in [self._label_a, self._label_b]:
-            lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
-
-        toolbar.addWidget(QLabel("Mode:"))
-        toolbar.addWidget(self._mode)
-        toolbar.addWidget(self._swap_btn)
-        toolbar.addWidget(self._sync_chk)
-        toolbar.addStretch()
-        toolbar.addWidget(self._label_a)
-        toolbar.addWidget(QLabel("  vs  "))
-        toolbar.addWidget(self._label_b)
-        layout.addLayout(toolbar)
-
-        # ── GL Viewers with zoom labels ────────────────────────────
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        left_wrap  = QWidget()
-        right_wrap = QWidget()
-        for wrap in [left_wrap, right_wrap]:
-            wrap.setLayout(QVBoxLayout())
-            wrap.layout().setContentsMargins(0, 0, 0, 0)
-            wrap.layout().setSpacing(2)
-
-        self._viewer_a = GLImageViewer()
-        self._viewer_b = GLImageViewer()
-        for v in [self._viewer_a, self._viewer_b]:
-            v.setMinimumSize(200, 150)
-
-        self._zoom_a = QLabel("Zoom: —")
-        self._zoom_b = QLabel("Zoom: —")
-        for lbl in [self._zoom_a, self._zoom_b]:
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(f"color: {ACCENT}; font-size: 10px; font-weight: 600;")
-
-        left_wrap.layout().addWidget(self._viewer_a)
-        left_wrap.layout().addWidget(self._zoom_a)
-        right_wrap.layout().addWidget(self._viewer_b)
-        right_wrap.layout().addWidget(self._zoom_b)
-
-        self._splitter.addWidget(left_wrap)
-        self._splitter.addWidget(right_wrap)
-        layout.addWidget(self._splitter)
-
-        # Zoom display
-        self._viewer_a.zoom_changed.connect(lambda z: self._zoom_a.setText(f"Zoom: {z*100:.0f}%"))
-        self._viewer_b.zoom_changed.connect(lambda z: self._zoom_b.setText(f"Zoom: {z*100:.0f}%"))
-
-        # Connect sync: a → b and b → a (set_view_state does not re-emit)
-        self._viewer_a.view_state_changed.connect(self._sync_a_to_b)
-        self._viewer_b.view_state_changed.connect(self._sync_b_to_a)
-
-        # ── Metrics bar ────────────────────────────────────────────
-        self._metrics_label = QLabel("")
-        self._metrics_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._metrics_label.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 10px; padding: 2px;"
+    def clear(self):
+        self._header.setText("  DIFF MAP   ·   load both images to compute")
+        self._header.setStyleSheet(
+            "background:#101A10; color:#336633; padding:4px 8px; font-size:10px;"
         )
-        self._metrics_label.setWordWrap(True)
-        layout.addWidget(self._metrics_label)
 
-        # ── Pixel Loupe ────────────────────────────────────────────
-        loupe_row = QHBoxLayout()
-        loupe_row.setSpacing(8)
 
-        self._loupe_chk = QCheckBox("Pixel Loupe")
-        self._loupe_chk.setChecked(True)
-        self._loupe_chk.setToolTip(
-            "Shows the pixel area under the cursor in both images at 8× zoom.\n"
-            "Hover over either viewer to see exact pixel-level detail side by side."
+# ── Pixel Loupe ───────────────────────────────────────────────────────────
+
+class PixelLoupe(QWidget):
+    """Shows A and B pixel patches at hover position side by side."""
+
+    PATCH_PX = 16   # pixels extracted from image
+    DISP_PX  = 96   # display size of loupe square
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._img_a: np.ndarray | None = None
+        self._img_b: np.ndarray | None = None
+        self._build()
+
+    def _build(self):
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(16)
+
+        def _col(title):
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            ttl = QLabel(title)
+            ttl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:9px;")
+            ttl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img = QLabel()
+            img.setFixedSize(self.DISP_PX, self.DISP_PX)
+            img.setStyleSheet("background:#08080F; border:1px solid #1A2535;")
+            img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val = QLabel("R:—  G:—  B:—")
+            val.setStyleSheet(f"color:{TEXT_PRIMARY}; font-size:9px; font-weight:600;")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(ttl)
+            col.addWidget(img)
+            col.addWidget(val)
+            return col, img, val
+
+        col_a, self._img_lbl_a, self._val_a = _col("A — pixel")
+        col_b, self._img_lbl_b, self._val_b = _col("B — pixel")
+
+        # Delta column
+        delta_col = QVBoxLayout()
+        delta_col.setSpacing(4)
+        delta_ttl = QLabel("Δ (A−B)")
+        delta_ttl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:9px;")
+        delta_ttl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._delta_lbl = QLabel("—")
+        self._delta_lbl.setStyleSheet(
+            f"color:{TEXT_PRIMARY}; font-size:11px; font-weight:700;"
         )
-        self._loupe_chk.stateChanged.connect(self._update_loupe_visibility)
+        self._delta_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._delta_lbl.setWordWrap(True)
+        self._delta_lbl.setFixedWidth(80)
+        delta_col.addWidget(delta_ttl)
+        delta_col.addStretch()
+        delta_col.addWidget(self._delta_lbl)
+        delta_col.addStretch()
 
-        self._loupe_coord = QLabel("X: —  Y: —")
-        self._loupe_coord.setStyleSheet(f"color: {ACCENT}; font-size: 10px; font-weight: 600; min-width: 90px;")
-        self._loupe_coord.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._coord_lbl = QLabel("X: —   Y: —")
+        self._coord_lbl.setStyleSheet(f"color:{ACCENT}; font-size:10px; font-weight:600;")
+        self._coord_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Image A loupe
-        loupe_a_col = QVBoxLayout()
-        loupe_a_col.setSpacing(2)
-        self._loupe_title_a = QLabel("A — pixel")
-        self._loupe_title_a.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
-        self._loupe_title_a.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loupe_img_a = QLabel()
-        self._loupe_img_a.setFixedSize(128, 128)
-        self._loupe_img_a.setStyleSheet("background: #0A0A0F; border: 1px solid #252535;")
-        self._loupe_img_a.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loupe_val_a = QLabel("R:—  G:—  B:—")
-        self._loupe_val_a.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 9px; font-weight: 600;")
-        self._loupe_val_a.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        loupe_a_col.addWidget(self._loupe_title_a)
-        loupe_a_col.addWidget(self._loupe_img_a)
-        loupe_a_col.addWidget(self._loupe_val_a)
+        lay.addLayout(col_a)
+        lay.addLayout(delta_col)
+        lay.addLayout(col_b)
+        lay.addStretch()
+        lay.addWidget(self._coord_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        # Image B loupe
-        loupe_b_col = QVBoxLayout()
-        loupe_b_col.setSpacing(2)
-        self._loupe_title_b = QLabel("B — pixel")
-        self._loupe_title_b.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
-        self._loupe_title_b.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loupe_img_b = QLabel()
-        self._loupe_img_b.setFixedSize(128, 128)
-        self._loupe_img_b.setStyleSheet("background: #0A0A0F; border: 1px solid #252535;")
-        self._loupe_img_b.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loupe_val_b = QLabel("R:—  G:—  B:—")
-        self._loupe_val_b.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 9px; font-weight: 600;")
-        self._loupe_val_b.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        loupe_b_col.addWidget(self._loupe_title_b)
-        loupe_b_col.addWidget(self._loupe_img_b)
-        loupe_b_col.addWidget(self._loupe_val_b)
+        self.setFixedHeight(self.DISP_PX + 50)
+        self.setStyleSheet(f"background:{BG_RAISED}; border-top:1px solid #1A2535;")
 
-        # Diff column
-        loupe_diff_col = QVBoxLayout()
-        loupe_diff_col.setSpacing(2)
-        self._loupe_diff_title = QLabel("Diff A−B")
-        self._loupe_diff_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9px;")
-        self._loupe_diff_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loupe_diff_val = QLabel("—")
-        self._loupe_diff_val.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 10px; font-weight: 700;")
-        self._loupe_diff_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loupe_diff_val.setWordWrap(True)
-        self._loupe_diff_val.setFixedWidth(120)
-        loupe_diff_col.addWidget(self._loupe_diff_title)
-        loupe_diff_col.addStretch()
-        loupe_diff_col.addWidget(self._loupe_diff_val)
-        loupe_diff_col.addStretch()
+    def update(self, ix: int, iy: int, img_a, img_b):
+        self._coord_lbl.setText(f"X: {ix}   Y: {iy}")
+        px_a = self._render_patch(img_a, ix, iy, self._img_lbl_a, self._val_a)
+        px_b = self._render_patch(img_b, ix, iy, self._img_lbl_b, self._val_b)
+        if px_a is not None and px_b is not None:
+            dr = int(px_a[0]) - int(px_b[0])
+            dg = int(px_a[1]) - int(px_b[1])
+            db = int(px_a[2]) - int(px_b[2])
+            self._delta_lbl.setText(f"R:{dr:+d}\nG:{dg:+d}\nB:{db:+d}")
+        else:
+            self._delta_lbl.setText("—")
 
-        self._loupe_widget = QWidget()
-        loupe_inner = QHBoxLayout(self._loupe_widget)
-        loupe_inner.setContentsMargins(4, 2, 4, 2)
-        loupe_inner.setSpacing(12)
-        loupe_inner.addLayout(loupe_a_col)
-        loupe_inner.addLayout(loupe_diff_col)
-        loupe_inner.addLayout(loupe_b_col)
-        loupe_inner.addStretch()
-        loupe_inner.addWidget(self._loupe_coord, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-        loupe_header = QHBoxLayout()
-        loupe_header.addWidget(self._loupe_chk)
-        loupe_header.addStretch()
-        layout.addLayout(loupe_header)
-        layout.addWidget(self._loupe_widget)
-
-        # Connect hover from both viewers
-        self._viewer_a.pixel_hovered.connect(self._on_hover)
-        self._viewer_b.pixel_hovered.connect(self._on_hover)
-
-        self.setMinimumHeight(220)
-
-    # ── Sync ───────────────────────────────────────────────────────
-
-    def _sync_a_to_b(self, zoom, ox, oy):
-        if self._sync_chk.isChecked():
-            self._viewer_b.set_view_state(zoom, ox, oy)
-
-    def _sync_b_to_a(self, zoom, ox, oy):
-        if self._sync_chk.isChecked():
-            self._viewer_a.set_view_state(zoom, ox, oy)
-
-    # ── Pixel Loupe ────────────────────────────────────────────────
-
-    def _update_loupe_visibility(self):
-        self._loupe_widget.setVisible(self._loupe_chk.isChecked())
-
-    def _on_hover(self, ix: int, iy: int, _pixel):
-        """Called when cursor moves over either viewer — update loupe for both images."""
-        if not self._loupe_chk.isChecked():
-            return
-        self._loupe_coord.setText(f"X: {ix}   Y: {iy}")
-        if self._image_a is not None:
-            self._render_loupe(self._image_a, ix, iy, self._loupe_img_a, self._loupe_val_a)
-        if self._image_b is not None:
-            self._render_loupe(self._image_b, ix, iy, self._loupe_img_b, self._loupe_val_b)
-        self._update_loupe_diff(ix, iy)
-
-    def _render_loupe(self, image: np.ndarray, cx: int, cy: int,
-                      label: QLabel, val_label: QLabel):
-        """Extract 16×16 patch around (cx,cy), scale to 128×128, show in label."""
-        img8 = self._to_8bit(image)
+    def _render_patch(self, img, cx, cy, lbl, val_lbl):
+        if img is None:
+            lbl.clear()
+            val_lbl.setText("R:—  G:—  B:—")
+            return None
+        img8 = self._to_8bit(img)
         if img8.ndim == 2:
             img8 = cv2.cvtColor(img8, cv2.COLOR_GRAY2RGB)
         h, w = img8.shape[:2]
+        if cx < 0 or cy < 0 or cx >= w or cy >= h:
+            return None
 
-        PATCH = 16
-        x1 = max(0, cx - PATCH // 2)
-        y1 = max(0, cy - PATCH // 2)
-        x2 = min(w, x1 + PATCH)
-        y2 = min(h, y1 + PATCH)
+        # Extract patch
+        half = self.PATCH_PX // 2
+        x1, y1 = max(0, cx - half), max(0, cy - half)
+        x2, y2 = min(w, x1 + self.PATCH_PX), min(h, y1 + self.PATCH_PX)
         patch = img8[y1:y2, x1:x2]
-
         if patch.size == 0:
-            return
+            return None
 
-        # Scale to 128×128 with nearest-neighbour (raw pixels, no blur)
-        zoomed = cv2.resize(patch, (128, 128), interpolation=cv2.INTER_NEAREST)
-
-        # Draw crosshair at center
-        cx_z = int((cx - x1) / max(x2 - x1, 1) * 128)
-        cy_z = int((cy - y1) / max(y2 - y1, 1) * 128)
-        cv2.line(zoomed, (cx_z, 0),   (cx_z, 128), (0, 180, 216), 1)
-        cv2.line(zoomed, (0, cy_z),   (128, cy_z), (0, 180, 216), 1)
-
-        qimg = QImage(zoomed.data, 128, 128, 128 * 3, QImage.Format.Format_RGB888)
-        label.setPixmap(QPixmap.fromImage(qimg.copy()))
+        # Scale up (nearest-neighbour — keep pixels sharp)
+        scale = self.DISP_PX // self.PATCH_PX
+        big   = cv2.resize(patch, (patch.shape[1]*scale, patch.shape[0]*scale),
+                           interpolation=cv2.INTER_NEAREST)
+        qimg  = QImage(big.data, big.shape[1], big.shape[0],
+                       big.shape[1]*3, QImage.Format.Format_RGB888)
+        lbl.setPixmap(QPixmap.fromImage(qimg.copy()))
 
         # Pixel value at cursor
-        if 0 <= cy < h and 0 <= cx < w:
-            px = image[cy, cx]
-            if hasattr(px, "__len__") and len(px) >= 3:
-                r, g, b = int(px[0]), int(px[1]), int(px[2])
-                gray = int(0.299*r + 0.587*g + 0.114*b)
-                val_label.setText(f"R:{r}  G:{g}  B:{b}  Gray:{gray}")
-            else:
-                v = int(px) if not hasattr(px, "__len__") else int(px[0])
-                val_label.setText(f"Val: {v}")
-
-    def _update_loupe_diff(self, ix: int, iy: int):
-        """Show per-pixel diff at cursor position."""
-        if self._image_a is None or self._image_b is None:
-            return
-        a8 = self._to_8bit(self._image_a)
-        b8 = self._to_8bit(self._image_b)
-        h = min(a8.shape[0], b8.shape[0])
-        w = min(a8.shape[1], b8.shape[1])
-        if not (0 <= iy < h and 0 <= ix < w):
-            return
-        pa = a8[iy, ix]
-        pb = b8[iy, ix]
-        if a8.ndim == 3 and len(pa) >= 3:
-            dr = int(pa[0]) - int(pb[0])
-            dg = int(pa[1]) - int(pb[1])
-            db = int(pa[2]) - int(pb[2])
-            total = abs(dr) + abs(dg) + abs(db)
-            color = "#00E676" if total == 0 else ("#FFAB40" if total < 20 else "#FF5252")
-            self._loupe_diff_val.setText(
-                f"ΔR: {dr:+d}\nΔG: {dg:+d}\nΔB: {db:+d}\nTotal: {total}"
-            )
-            self._loupe_diff_val.setStyleSheet(
-                f"color: {color}; font-size: 10px; font-weight: 700;"
-            )
-        else:
-            va = int(pa) if not hasattr(pa, "__len__") else int(pa[0])
-            vb = int(pb) if not hasattr(pb, "__len__") else int(pb[0])
-            diff = va - vb
-            color = "#00E676" if diff == 0 else "#FF5252"
-            self._loupe_diff_val.setText(f"Δ: {diff:+d}")
-            self._loupe_diff_val.setStyleSheet(
-                f"color: {color}; font-size: 12px; font-weight: 700;"
-            )
-
-    # ── Public API ─────────────────────────────────────────────────
-
-    def set_image_a(self, image: np.ndarray, name: str):
-        self._image_a = image
-        self._label_a.setText(f"A: {name}")
-        self._update()
-
-    def set_image_b(self, image: np.ndarray, name: str):
-        self._image_b = image
-        self._label_b.setText(f"B: {name}")
-        self._update()
-
-    def _swap(self):
-        self._image_a, self._image_b = self._image_b, self._image_a
-        a_txt = self._label_a.text()
-        b_txt = self._label_b.text()
-        self._label_a.setText(b_txt.replace("B:", "A:"))
-        self._label_b.setText(a_txt.replace("A:", "B:"))
-        self._update()
-
-    # ── Mode handling ──────────────────────────────────────────────
-
-    def _on_mode_changed(self, mode: str):
-        self._flicker_timer.stop()
-        self._update()
-
-    def _update(self):
-        mode = self._mode.currentText()
-        if self._image_a is None and self._image_b is None:
-            return
-
-        if mode == "Side by Side":
-            self._viewer_a.setVisible(True)
-            self._viewer_b.setVisible(True)
-            if self._image_a is not None:
-                self._viewer_a.set_image(self._image_a)
-            if self._image_b is not None:
-                self._viewer_b.set_image(self._image_b)
-            self._metrics_label.setText(
-                "Left drag to pan  ·  Scroll wheel to zoom  ·  "
-                "Right drag to zoom to region  ·  Double-click to fit"
-            )
-
-        elif mode == "Difference (A−B)":
-            if self._image_a is not None and self._image_b is not None:
-                a8 = self._to_8bit(self._image_a)
-                b8 = self._to_8bit(self._image_b)
-                if a8.shape != b8.shape:
-                    b8 = cv2.resize(b8, (a8.shape[1], a8.shape[0]))
-
-                diff_f = np.abs(a8.astype(np.float32) - b8.astype(np.float32))
-                diff8  = np.clip(diff_f * 8, 0, 255).astype(np.uint8)
-                if diff8.ndim == 2:
-                    diff_rgb = cv2.cvtColor(
-                        cv2.applyColorMap(diff8, cv2.COLORMAP_JET),
-                        cv2.COLOR_BGR2RGB
-                    )
-                else:
-                    gray = cv2.cvtColor(diff8, cv2.COLOR_RGB2GRAY)
-                    diff_rgb = cv2.cvtColor(
-                        cv2.applyColorMap(gray, cv2.COLORMAP_JET),
-                        cv2.COLOR_BGR2RGB
-                    )
-
-                self._viewer_a.set_image(a8)
-                self._viewer_b.set_image(diff_rgb)
-                self._viewer_a.setVisible(True)
-                self._viewer_b.setVisible(True)
-                self._show_diff_metrics(a8, b8, diff_f)
-
-        elif mode == "Overlay Blend":
-            if self._image_a is not None and self._image_b is not None:
-                a8 = self._to_8bit(self._image_a)
-                b8 = self._to_8bit(self._image_b)
-                if a8.shape != b8.shape:
-                    b8 = cv2.resize(b8, (a8.shape[1], a8.shape[0]))
-                blended = cv2.addWeighted(a8, 0.5, b8, 0.5, 0)
-                self._viewer_a.set_image(blended)
-                self._viewer_b.setVisible(False)
-                self._metrics_label.setText("50% A  +  50% B  overlay blend")
-
-        elif mode == "Flicker":
-            if self._image_a is not None and self._image_b is not None:
-                self._viewer_b.setVisible(False)
-                self._viewer_a.set_image(self._image_a)
-                self._flicker_timer.start(500)
-                self._metrics_label.setText(
-                    "Flicker mode — alternating A/B every 500ms.  "
-                    "Eye catches any change instantly."
-                )
-
-    def _flicker_tick(self):
-        if self._image_a is None or self._image_b is None:
-            return
-        self._flicker_state = not self._flicker_state
-        self._viewer_a.set_image(
-            self._image_b if self._flicker_state else self._image_a
-        )
-
-    def _show_diff_metrics(self, a8: np.ndarray, b8: np.ndarray, diff_f: np.ndarray):
-        mae  = float(np.mean(diff_f))
-        pct  = mae / 255 * 100
-
-        parts = [f"MAE: {mae:.2f}/255 ({pct:.2f}%)"]
-
-        if _SKIMAGE:
-            try:
-                win = min(7, min(a8.shape[:2]))
-                if win % 2 == 0:
-                    win -= 1
-                if win >= 3:
-                    ch_axis = 2 if a8.ndim == 3 else None
-                    ssim_v = structural_similarity(
-                        a8, b8, channel_axis=ch_axis, win_size=win, data_range=255
-                    )
-                    psnr_v = peak_signal_noise_ratio(a8, b8, data_range=255)
-                    parts.append(f"PSNR: {psnr_v:.1f} dB")
-                    parts.append(f"SSIM: {ssim_v:.4f}")
-            except Exception:
-                pass
-
-        if a8.ndim == 3:
-            ch_names = ["R", "G", "B"]
-            ch_diffs = [f"{n}:{float(np.mean(np.abs(a8[:,:,i].astype(float)-b8[:,:,i].astype(float)))):.1f}"
-                        for i, n in enumerate(ch_names) if i < a8.shape[2]]
-            parts.append("Per-channel: " + "  ".join(ch_diffs))
-
-        identical = mae < 0.5
-        status = "IDENTICAL" if identical else ("NEAR-IDENTICAL" if mae < 2 else "DIFFERS")
-        parts.append(f"→ {status}")
-
-        self._metrics_label.setText("   |   ".join(parts))
+        px = img8[cy, cx]
+        if px.ndim == 0 or len(px) < 3:
+            val_lbl.setText(f"L:{int(px)}")
+            return (int(px),) * 3
+        val_lbl.setText(f"R:{px[0]}  G:{px[1]}  B:{px[2]}")
+        return (int(px[0]), int(px[1]), int(px[2]))
 
     @staticmethod
-    def _to_8bit(image: np.ndarray) -> np.ndarray:
-        if image.dtype == np.uint16:
-            return (image >> 8).astype(np.uint8)
-        return image.astype(np.uint8)
+    def _to_8bit(img):
+        if img.dtype == np.uint16:
+            return (img >> 8).astype(np.uint8)
+        if img.dtype != np.uint8:
+            return cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return img
 
 
-# ── Main Comparison Panel ──────────────────────────────────────────────────
+# ── Main comparison panel ─────────────────────────────────────────────────
 
 class ComparisonPanel(QWidget):
     """
-    Full image comparison panel.
-    Load any number of images → automatic quality ranking → side-by-side compare.
+    Professional A/B/Diff comparison panel.
+    External API:
+      load_path(path)  — loads into active slot (called from main window / browser)
+      active_slot      — 'A' or 'B'
     """
-
-    open_image_requested = pyqtSignal(str)   # ask main window to open this image
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._cards: list[ImageCard]       = []
-        self._workers: list[ImageAnalyzeWorker] = []
-        self._compare_slots: list[ImageCard | None] = [None, None]
-        self._sort_key = "quality"
-
-        self.focus_engine   = FocusEngine()
-        self.quality_engine = QualityEngine()
-
+        self._img_a:  np.ndarray | None = None
+        self._img_b:  np.ndarray | None = None
+        self._active  = "A"
+        self._diff_worker: DiffWorker | None = None
+        self._flicker_timer = QTimer()
+        self._flicker_timer.timeout.connect(self._flicker_tick)
+        self._flicker_state = False
         self._build()
 
-    def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+    # ── Public API ────────────────────────────────────────────────────────
 
-        # ── Toolbar ────────────────────────────────────────────────
-        toolbar = QHBoxLayout()
+    @property
+    def active_slot(self) -> str:
+        return self._active
 
-        btn_load = QPushButton("+ Load Images")
-        btn_load.setProperty("accent", True)
-        btn_load.setToolTip(
-            "Load multiple images to compare.\n"
-            "Can be same scene in different formats (TIFF vs PNG vs JPEG),\n"
-            "different exposures, different capture settings.\n"
-            "Automatic quality ranking tells you which is best for AI training."
-        )
-        btn_load.clicked.connect(self._load_images)
-
-        btn_clear = QPushButton("Clear All")
-        btn_clear.setProperty("danger", True)
-        btn_clear.clicked.connect(self._clear_all)
-
-        btn_best = QPushButton("⬇ Export Best")
-        btn_best.setToolTip("Export the highest-ranked image to a chosen folder.")
-        btn_best.clicked.connect(self._export_best)
-
-        self._sort_combo = QComboBox()
-        self._sort_combo.addItems(["Sort: Quality Score", "Sort: Focus Score", "Sort: SNR", "Sort: Filename"])
-        self._sort_combo.setToolTip("Re-rank images by selected metric.")
-        self._sort_combo.currentTextChanged.connect(self._resort)
-
-        self._count_label = QLabel("No images loaded")
-        self._count_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
-
-        toolbar.addWidget(btn_load)
-        toolbar.addWidget(btn_clear)
-        toolbar.addWidget(btn_best)
-        toolbar.addWidget(self._sort_combo)
-        toolbar.addStretch()
-        toolbar.addWidget(self._count_label)
-        layout.addLayout(toolbar)
-
-        # Instructions
-        self._hint = QLabel(
-            "Load multiple images of the same scene.  "
-            "Click ＋ Compare on any two to compare them side by side.  "
-            "Best image for AI training is ranked #1."
-        )
-        self._hint.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
-        self._hint.setWordWrap(True)
-        layout.addWidget(self._hint)
-
-        # ── Splitter: compare workspace first, supporting cards below ──
-        splitter = QSplitter(Qt.Orientation.Vertical)
-
-        # Compare view
-        self._compare_view = CompareView()
-        self._compare_view.setMinimumHeight(420)
-
-        # Card scroll area
-        self._card_scroll = QScrollArea()
-        self._card_scroll.setWidgetResizable(True)
-        self._card_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._cards_widget = QWidget()
-        self._cards_layout = QHBoxLayout(self._cards_widget)
-        self._cards_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._cards_layout.setSpacing(10)
-        self._cards_layout.setContentsMargins(4, 4, 4, 4)
-        self._card_scroll.setWidget(self._cards_widget)
-        self._card_scroll.setMinimumHeight(150)
-
-        splitter.addWidget(self._compare_view)
-        splitter.addWidget(self._card_scroll)
-        splitter.setSizes([700, 180])
-        layout.addWidget(splitter)
-
-    # ── Load & analyze ─────────────────────────────────────────────
-
-    def _load_images(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Load Images for Comparison", "",
-            "All Images (*.tiff *.tif *.png *.bmp *.jpg *.jpeg *.pgm *.ppm *.exr *.hdr);;"
-            "All Files (*)"
-        )
-        for path in paths:
-            if not any(c.path == path for c in self._cards):
-                self._add_card(path)
-
-    def _add_card(self, path: str):
-        card = ImageCard(path)
-        card.selected.connect(self._on_card_selected)
-        card.compare_req.connect(self._on_compare_req)
-        self._cards.append(card)
-        self._cards_layout.addWidget(card)
-        self._count_label.setText(f"{len(self._cards)} images")
-
-        # Start analysis worker
-        worker = ImageAnalyzeWorker(path, self.focus_engine, self.quality_engine)
-        worker.result_ready.connect(self._on_analysis_ready)
-        self._workers.append(worker)
-        worker.start()
-
-    def _on_analysis_ready(self, path: str, focus_result, quality_result):
-        for card in self._cards:
-            if card.path == path:
-                card.set_results(focus_result, quality_result)
-                break
-        self._rank_cards()
-
-    def _rank_cards(self):
-        """Re-rank all cards that have results."""
-        ready = [c for c in self._cards if c.quality_result is not None]
-        if not ready:
+    def load_path(self, path: str):
+        """Load image file into the currently active slot."""
+        try:
+            data = load_image(path)
+            img  = data.raw
+        except Exception as e:
             return
-
-        key = self._sort_combo.currentText()
-        if "Focus" in key:
-            ready.sort(key=lambda c: c.focus_result.score, reverse=True)
-        elif "SNR" in key:
-            ready.sort(key=lambda c: c.quality_result.snr_db, reverse=True)
-        elif "Filename" in key:
-            ready.sort(key=lambda c: os.path.basename(c.path))
-        else:  # Quality Score (default)
-            ready.sort(key=lambda c: c.quality_result.overall_score, reverse=True)
-
-        for i, card in enumerate(ready):
-            card.set_rank(i + 1, len(ready))
-
-    def _resort(self):
-        self._rank_cards()
-
-    # ── Selection & comparison ─────────────────────────────────────
-
-    def _on_card_selected(self, card: ImageCard):
-        """Single click → open in main viewer."""
-        self.open_image_requested.emit(card.path)
-
-    def _on_compare_req(self, card: ImageCard):
-        """
-        Click ＋ Compare on a card:
-          First click  → card highlighted green as A, button shows "✓ A"
-          Second click → auto-loads both A and B, starts comparison
-        """
-        if self._compare_slots[0] is None:
-            # Select as A — highlight card and update button label
-            self._compare_slots[0] = card
-            card._cmp_btn.setText("✓  Selected as A")
-            card._cmp_btn.setStyleSheet(card._cmp_btn.styleSheet().replace(
-                f"color: {ACCENT}", "color: #00E676"
-            ))
-            self._hint.setText(
-                "Image A selected.  Now click  ＋ Compare  on a second image to compare."
-            )
+        if self._active == "A":
+            self._img_a = img
+            self._slot_a.set_image(path, img)
         else:
-            if card is self._compare_slots[0]:
-                # Clicked same card — deselect
-                self._compare_slots[0] = None
-                card._cmp_btn.setText("＋ Compare")
-                self._hint.setText(
-                    "Load multiple images of the same scene.  "
-                    "Click ＋ Compare on any two to compare them side by side."
-                )
-                return
+            self._img_b = img
+            self._slot_b.set_image(path, img)
+        self._trigger_diff()
 
-            # Load both and compare
-            try:
-                a = self._compare_slots[0]
-                data_a = load_image(a.path)
-                data_b = load_image(card.path)
-                self._compare_view.set_image_a(data_a.raw, os.path.basename(a.path))
-                self._compare_view.set_image_b(data_b.raw, os.path.basename(card.path))
-            except Exception:
-                pass
+    # ── Build UI ──────────────────────────────────────────────────────────
 
-            # Reset card A button label
-            self._compare_slots[0]._cmp_btn.setText("＋ Compare")
-            self._compare_slots[0]._cmp_btn.setStyleSheet(
-                self._compare_slots[0]._cmp_btn.styleSheet().replace(
-                    "color: #00E676", f"color: {ACCENT}"
-                )
-            )
-            self._compare_slots = [None, None]
-            self._hint.setText(
-                "Load multiple images of the same scene.  "
-                "Click ＋ Compare on any two to compare them side by side."
-            )
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-    # ── Export ─────────────────────────────────────────────────────
+        root.addWidget(self._build_toolbar())
+        root.addWidget(self._build_metrics_bar())
+        root.addWidget(self._build_viewers(), stretch=1)
+        root.addWidget(self._build_loupe())
 
-    def _export_best(self):
-        best = next((c for c in self._cards if c.rank == 1), None)
-        if not best:
-            return
-        dest, _ = QFileDialog.getSaveFileName(
-            self, "Export Best Image",
-            os.path.basename(best.path),
-            "PNG (*.png);;TIFF (*.tiff);;All Files (*)"
+        self._activate("A")
+
+    def _build_toolbar(self) -> QWidget:
+        bar = QWidget()
+        bar.setFixedHeight(38)
+        bar.setStyleSheet(
+            f"background:#080E18; border-bottom:1px solid #1A2535;"
         )
-        if dest:
-            import shutil
-            shutil.copy2(best.path, dest)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(8)
 
-    def _clear_all(self):
-        for worker in self._workers:
-            worker.quit()
-        self._workers.clear()
-        for card in self._cards:
-            self._cards_layout.removeWidget(card)
-            card.deleteLater()
-        self._cards.clear()
-        self._compare_slots = [None, None]
-        self._count_label.setText("No images loaded")
+        _BTN = (
+            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
+            "              padding:3px 10px; font-size:10px; border-radius:3px; }"
+            "QPushButton:hover { background:#112233; color:#88CCEE; }"
+        )
 
-    # ── Add current image from main viewer ─────────────────────────
+        # Load A
+        self._load_a_btn = QPushButton("📂  Load Reference (A)")
+        self._load_a_btn.setStyleSheet(_BTN)
+        self._load_a_btn.setToolTip("Load reference / known-good image into slot A")
+        self._load_a_btn.clicked.connect(lambda: self._browse_and_load("A"))
+        lay.addWidget(self._load_a_btn)
 
-    def add_image_from_path(self, path: str):
-        """Called by main window to add currently open image to comparison."""
-        if path and os.path.isfile(path) and not any(c.path == path for c in self._cards):
-            self._add_card(path)
+        # Load B
+        self._load_b_btn = QPushButton("📂  Load Test (B)")
+        self._load_b_btn.setStyleSheet(_BTN)
+        self._load_b_btn.setToolTip("Load test / inspection image into slot B")
+        self._load_b_btn.clicked.connect(lambda: self._browse_and_load("B"))
+        lay.addWidget(self._load_b_btn)
+
+        lay.addSpacing(12)
+
+        # Swap
+        swap_btn = QPushButton("⇄  Swap A↔B")
+        swap_btn.setStyleSheet(_BTN)
+        swap_btn.setToolTip("Swap reference and test images")
+        swap_btn.clicked.connect(self._swap)
+        lay.addWidget(swap_btn)
+
+        lay.addSpacing(12)
+
+        # Diff mode
+        mode_lbl = QLabel("Diff:")
+        mode_lbl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:10px;")
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(["Diff Map", "Blend 50/50", "Flicker"])
+        self._mode_combo.setToolTip(
+            "Diff Map   — hot colormap, red = changed pixels\n"
+            "Blend      — 50% A + 50% B overlay\n"
+            "Flicker    — alternates A and B every 600ms"
+        )
+        self._mode_combo.setFixedWidth(110)
+        self._mode_combo.setStyleSheet(
+            "QComboBox { background:#0A1828; color:#88AACC; border:1px solid #1A2A3A; "
+            "            padding:2px 6px; font-size:10px; border-radius:3px; }"
+            "QComboBox::drop-down { border:none; }"
+        )
+        self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        lay.addWidget(mode_lbl)
+        lay.addWidget(self._mode_combo)
+
+        lay.addSpacing(12)
+
+        # Amplify slider
+        amp_lbl = QLabel("Amplify:")
+        amp_lbl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:10px;")
+        self._amp_slider = QSlider(Qt.Orientation.Horizontal)
+        self._amp_slider.setRange(1, 20)
+        self._amp_slider.setValue(4)
+        self._amp_slider.setFixedWidth(80)
+        self._amp_slider.setToolTip(
+            "Boost subtle pixel differences so they become visible.\n"
+            "1× = raw diff  ·  10× = 10x brighter  ·  20× = maximum"
+        )
+        self._amp_val_lbl = QLabel("×4")
+        self._amp_val_lbl.setStyleSheet(f"color:{ACCENT}; font-size:10px; font-weight:700;")
+        self._amp_val_lbl.setFixedWidth(24)
+        self._amp_slider.valueChanged.connect(self._on_amp_changed)
+        lay.addWidget(amp_lbl)
+        lay.addWidget(self._amp_slider)
+        lay.addWidget(self._amp_val_lbl)
+
+        lay.addStretch()
+
+        # Active slot indicator
+        self._active_lbl = QLabel("Active: A")
+        self._active_lbl.setStyleSheet(
+            f"color:{ACCENT}; font-size:10px; font-weight:700;"
+        )
+        lay.addWidget(self._active_lbl)
+
+        return bar
+
+    def _build_metrics_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setFixedHeight(28)
+        bar.setStyleSheet(
+            "background:#060C12; border-bottom:1px solid #1A2535;"
+        )
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(12, 0, 12, 0)
+        lay.setSpacing(0)
+
+        self._metrics_lbl = QLabel(
+            "Load both images to see comparison metrics"
+        )
+        self._metrics_lbl.setStyleSheet(
+            f"color:{TEXT_SECONDARY}; font-size:10px;"
+        )
+        lay.addWidget(self._metrics_lbl)
+        lay.addStretch()
+        return bar
+
+    def _build_viewers(self) -> QWidget:
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+
+        self._slot_a = SlotPanel("A")
+        self._slot_b = SlotPanel("B")
+        self._diff_panel = DiffPanel()
+
+        self._splitter.addWidget(self._slot_a)
+        self._splitter.addWidget(self._slot_b)
+        self._splitter.addWidget(self._diff_panel)
+        self._splitter.setSizes([1, 1, 1])
+
+        # Activate on click
+        self._slot_a.activated.connect(self._activate)
+        self._slot_b.activated.connect(self._activate)
+
+        # Drag-drop load
+        self._slot_a.load_requested.connect(lambda _s, p: self._load_into("A", p))
+        self._slot_b.load_requested.connect(lambda _s, p: self._load_into("B", p))
+
+        # Zoom display in headers
+        self._slot_a.viewer.zoom_changed.connect(self._slot_a.update_zoom)
+        self._slot_b.viewer.zoom_changed.connect(self._slot_b.update_zoom)
+
+        # Linked zoom/pan across all three
+        self._slot_a.viewer.view_state_changed.connect(self._sync_from_a)
+        self._slot_b.viewer.view_state_changed.connect(self._sync_from_b)
+
+        # Pixel loupe hover
+        self._slot_a.viewer.pixel_hovered.connect(self._on_hover)
+        self._slot_b.viewer.pixel_hovered.connect(self._on_hover)
+
+        return self._splitter
+
+    def _build_loupe(self) -> QWidget:
+        self._loupe = PixelLoupe()
+        return self._loupe
+
+    # ── Activation ───────────────────────────────────────────────────────
+
+    def _activate(self, slot: str):
+        self._active = slot
+        self._slot_a.set_active(slot == "A")
+        self._slot_b.set_active(slot == "B")
+        self._active_lbl.setText(f"Active: {slot}")
+
+    # ── Load ─────────────────────────────────────────────────────────────
+
+    def _browse_and_load(self, slot: str):
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Load image into slot {slot}",
+            "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)"
+        )
+        if path:
+            self._activate(slot)
+            self._load_into(slot, path)
+
+    def _load_into(self, slot: str, path: str):
+        try:
+            data = load_image(path)
+            img  = data.raw
+        except Exception:
+            return
+        if slot == "A":
+            self._img_a = img
+            self._slot_a.set_image(path, img)
+        else:
+            self._img_b = img
+            self._slot_b.set_image(path, img)
+        self._trigger_diff()
+
+    # ── Diff computation ──────────────────────────────────────────────────
+
+    def _trigger_diff(self):
+        if self._img_a is None or self._img_b is None:
+            return
+        mode = self._mode_combo.currentText()
+        amp  = self._amp_slider.value()
+
+        if self._diff_worker and self._diff_worker.isRunning():
+            self._diff_worker.quit()
+
+        if mode == "Blend 50/50":
+            self._show_blend()
+            return
+
+        self._diff_worker = DiffWorker(self._img_a, self._img_b, amp)
+        self._diff_worker.done.connect(self._on_diff_done)
+        self._diff_worker.start()
+
+    def _on_diff_done(self, diff_rgb: np.ndarray, metrics: dict, auto_normalized: bool):
+        self._diff_panel.set_diff(diff_rgb, self._amp_slider.value(), auto_normalized)
+        self._show_metrics(metrics)
+
+    def _show_blend(self):
+        if self._img_a is None or self._img_b is None:
+            return
+        a = self._to_8bit(self._img_a)
+        b = self._to_8bit(self._img_b)
+        if a.ndim == 2:
+            a = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
+        if b.ndim == 2:
+            b = cv2.cvtColor(b, cv2.COLOR_GRAY2RGB)
+        if a.shape != b.shape:
+            b = cv2.resize(b, (a.shape[1], a.shape[0]))
+        blend = cv2.addWeighted(a, 0.5, b, 0.5, 0)
+        self._diff_panel.viewer.set_image(blend)
+        self._diff_panel._header.setText("  BLEND   ·   50% A + 50% B overlay")
+
+    def _show_metrics(self, m: dict):
+        parts = []
+        if m["ssim"] is not None:
+            parts.append(f"SSIM: {m['ssim']:.3f}")
+        if m["psnr"] is not None:
+            psnr_str = f"{m['psnr']:.1f} dB" if m["psnr"] < 100 else "∞"
+            parts.append(f"PSNR: {psnr_str}")
+        parts.append(f"Diff pixels: {m['pixel_diff']:.1f}%")
+        parts.append(f"Max Δ: {m['max_dev']}")
+        parts.append(f"Mean Δ: {m['mean_dev']:.1f}")
+
+        verdict  = m["verdict"]
+        v_color  = "#44FF88" if verdict == "PASS" else "#FF4444"
+        v_symbol = "✓" if verdict == "PASS" else "✗"
+        metrics_str = "   │   ".join(parts)
+        self._metrics_lbl.setText(
+            f"{metrics_str}   │   "
+            f"<span style='color:{v_color}; font-weight:700;'>{v_symbol} {verdict}</span>"
+        )
+        self._metrics_lbl.setTextFormat(Qt.TextFormat.RichText)
+
+    # ── Sync zoom/pan ─────────────────────────────────────────────────────
+
+    def _sync_from_a(self, zoom, ox, oy):
+        for v in [self._slot_b.viewer, self._diff_panel.viewer]:
+            v.blockSignals(True)
+            v.set_view_state(zoom, ox, oy)
+            v.blockSignals(False)
+        self._slot_b.update_zoom(zoom)
+
+    def _sync_from_b(self, zoom, ox, oy):
+        for v in [self._slot_a.viewer, self._diff_panel.viewer]:
+            v.blockSignals(True)
+            v.set_view_state(zoom, ox, oy)
+            v.blockSignals(False)
+        self._slot_a.update_zoom(zoom)
+
+    # ── Pixel loupe ───────────────────────────────────────────────────────
+
+    def _on_hover(self, ix: int, iy: int, _pixel):
+        self._loupe.update(ix, iy, self._img_a, self._img_b)
+
+    # ── Controls ──────────────────────────────────────────────────────────
+
+    def _swap(self):
+        self._img_a, self._img_b = self._img_b, self._img_a
+        path_a = self._slot_a._path
+        path_b = self._slot_b._path
+        img_a  = self._img_a
+        img_b  = self._img_b
+        if img_a is not None:
+            self._slot_a.set_image(path_b, img_a)
+        if img_b is not None:
+            self._slot_b.set_image(path_a, img_b)
+        self._trigger_diff()
+
+    def _on_mode_changed(self, mode: str):
+        if mode == "Flicker":
+            self._flicker_timer.start(600)
+        else:
+            self._flicker_timer.stop()
+            if mode == "Blend 50/50":
+                self._show_blend()
+            else:
+                self._trigger_diff()
+
+    def _flicker_tick(self):
+        if self._img_a is None or self._img_b is None:
+            return
+        img = self._img_a if self._flicker_state else self._img_b
+        label = "A — REFERENCE" if self._flicker_state else "B — TEST"
+        self._diff_panel.viewer.set_image(img)
+        self._diff_panel._header.setText(f"  FLICKER   ·   showing {label}")
+        self._flicker_state = not self._flicker_state
+
+    def _on_amp_changed(self, val: int):
+        self._amp_val_lbl.setText(f"×{val}")
+        mode = self._mode_combo.currentText()
+        if mode == "Diff Map":
+            self._trigger_diff()
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_8bit(img: np.ndarray) -> np.ndarray:
+        if img.dtype == np.uint16:
+            return (img >> 8).astype(np.uint8)
+        if img.dtype != np.uint8:
+            return cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return img
