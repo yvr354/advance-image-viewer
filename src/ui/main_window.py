@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
         mode_bar = QHBoxLayout()
         mode_bar.setContentsMargins(8, 4, 8, 4)
         mode_bar.setSpacing(6)
-        for mode in ["Inspect", "Focus", "Compare", "Tune", "Fusion", "3D"]:
+        for mode in ["Inspect", "Focus", "Compare", "Filters", "Fusion", "3D"]:
             btn = QPushButton(mode)
             btn.setCheckable(True)
             btn.setFixedHeight(26)
@@ -800,8 +800,8 @@ class MainWindow(QMainWindow):
         else:
             self._workspace.setCurrentWidget(self._image_page)
             self._dock_browser.setVisible(mode in {"Inspect", "Focus"})
-            self._dock_inspector.setVisible(mode in {"Inspect", "Focus", "Tune", "Fusion"})
-            if mode == "Tune":
+            self._dock_inspector.setVisible(mode in {"Inspect", "Focus", "Filters", "Fusion"})
+            if mode == "Filters":
                 self._dock_pipeline.setVisible(True)
                 self._dock_pipeline.raise_()
             elif mode == "Fusion":
@@ -833,7 +833,7 @@ class MainWindow(QMainWindow):
         elif mode == "Inspect":
             self._mode_banner.setText("")
             self._mode_banner.setVisible(False)
-        elif mode == "Tune":
+        elif mode == "Filters":
             self._mode_banner.setText("TUNE MODE - filter controls are active, processed image stays in the center")
             self._mode_banner.setVisible(True)
         elif mode == "Fusion":
