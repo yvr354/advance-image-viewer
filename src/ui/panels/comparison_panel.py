@@ -599,6 +599,11 @@ class ComparisonPanel(QWidget):
         self._flicker_timer = QTimer()
         self._flicker_timer.timeout.connect(self._flicker_tick)
         self._flicker_state = False
+        # Debounce: wait 300 ms after last change before running analysis
+        self._debounce = QTimer()
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(300)
+        self._debounce.timeout.connect(self._run_analysis)
         self._build()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -928,17 +933,24 @@ class ComparisonPanel(QWidget):
     # ── Analysis trigger ──────────────────────────────────────────────────────
 
     def _trigger(self):
+        """Called on every slider/mode change — debounced to avoid flooding."""
         mode = self._mode.currentText()
         if mode == "Flicker":
             return
         if mode == "Blend 50/50":
             self._show_blend()
             return
+        self._debounce.start()   # resets the 300 ms countdown each call
+
+    def _run_analysis(self):
+        """Actually start the worker — called 300 ms after last _trigger()."""
         if self._img_a is None or self._img_b is None:
             return
 
         if self._worker and self._worker.isRunning():
+            self._worker.done.disconnect()   # discard stale result
             self._worker.quit()
+            self._worker.wait(200)           # brief wait; worker is fast
 
         self._worker = AnalysisWorker(
             self._img_a, self._img_b,
