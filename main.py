@@ -9,13 +9,12 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from src.ui.main_window import MainWindow
 from src.core.config import Config
+from src.core import branding
 from src.ui.theme import get_stylesheet
 
 
-APP_NAME    = "VyuhaAI Image Viewer"
 APP_VERSION = "1.0.0"
-APP_ORG     = "VyuhaAI"
-LOGO_PATH   = os.path.join(os.path.dirname(__file__), "resources", "icons", "logo.png")
+LOGO_PATH   = os.path.join(os.path.dirname(__file__), branding.LOGO_PNG)
 
 
 def main():
@@ -23,9 +22,9 @@ def main():
     # Use hardware OpenGL if GPU available, otherwise fall back to software (CPU)
     os.environ.setdefault("QT_OPENGL", "desktop")
     app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
+    app.setApplicationName(branding.APP_NAME)
     app.setApplicationVersion(APP_VERSION)
-    app.setOrganizationName(APP_ORG)
+    app.setOrganizationName(branding.APP_SHORT)
     app.setStyleSheet(get_stylesheet())
 
     if os.path.exists(LOGO_PATH):

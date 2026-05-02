@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 
 from src.core.image_loader import load_image, list_images_in_folder
+from src.core import branding
 from src.analysis.focus_engine import FocusEngine
 from src.analysis.quality_engine import QualityEngine
 from src.export.report_exporter import ImageRecord, export_csv, export_pdf
@@ -81,7 +82,7 @@ class BatchDialog(QDialog):
 
     def __init__(self, parent, focus_engine: FocusEngine, quality_engine: QualityEngine):
         super().__init__(parent)
-        self.setWindowTitle("VyuhaAI — Batch Analyze")
+        self.setWindowTitle(branding.BATCH_TITLE)
         self.resize(1020, 640)
         self.setMinimumSize(780, 480)
         self.setStyleSheet("""

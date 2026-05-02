@@ -14,6 +14,7 @@ import os
 import datetime
 from pathlib import Path
 from typing import List
+from src.core import branding
 
 
 # ── Data record ────────────────────────────────────────────────────────────
@@ -176,7 +177,7 @@ def _export_pdf_reportlab(records, out_path, get_image_fn, get_grid_fn):
 
     # Cover title
     now = datetime.datetime.now().strftime("%Y-%m-%d  %H:%M")
-    story.append(Paragraph("VyuhaAI Image Viewer — Focus & Quality Report", title_style))
+    story.append(Paragraph(branding.REPORT_TITLE, title_style))
     story.append(Paragraph(f"Generated: {now}   ·   {len(records)} image(s) analyzed", sub_style))
     story.append(HRFlowable(width="100%", thickness=1, color=CYAN, spaceAfter=12))
 
@@ -288,7 +289,7 @@ def _export_html(records, out_path, get_image_fn=None, get_grid_fn=None):
 <html>
 <head>
 <meta charset="utf-8">
-<title>VyuhaAI Focus Report</title>
+<title>{branding.APP_SHORT} Focus Report</title>
 <style>
   body {{ background:#0A0A1A; color:#CCCCDD; font-family:Segoe UI,sans-serif; padding:20px; }}
   h1   {{ color:#00B4D8; }} h2 {{ color:#00B4D8; font-size:13px; }}
@@ -299,7 +300,7 @@ def _export_html(records, out_path, get_image_fn=None, get_grid_fn=None):
 </style>
 </head>
 <body>
-<h1>VyuhaAI Image Viewer — Focus &amp; Quality Report</h1>
+<h1>{branding.REPORT_TITLE}</h1>
 <p style="color:#888899">Generated: {now} &nbsp;·&nbsp; {len(records)} image(s)</p>
 <table>
 <tr>

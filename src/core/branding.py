@@ -1,0 +1,11 @@
+"""Brand identity — differs between branches (VyuhaAI vs Gevis)."""
+
+APP_NAME        = "VyuhaAI Image Viewer"
+APP_SHORT       = "VyuhaAI"
+WINDOW_TITLE    = "VyuhaAI Image Viewer"
+STATUS_DEFAULT  = "VyuhaAI Image Viewer  —  Open an image  (Ctrl+O)"
+PIPELINE_EXT    = "VyuhaAI Pipeline (*.pipeline)"
+REPORT_TITLE    = "VyuhaAI Image Viewer — Focus & Quality Report"
+BATCH_TITLE     = "VyuhaAI — Batch Analyze"
+LOGO_ICO        = "resources/icons/logo.ico"
+LOGO_PNG        = "resources/icons/logo.png"

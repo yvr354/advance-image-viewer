@@ -28,6 +28,7 @@ from PyQt6.QtGui import QKeySequence, QAction, QIcon, QShortcut
 from src.core.config import Config
 from src.core.image_data import ImageData
 from src.core.image_loader import load_image, list_images_in_folder
+from src.core import branding
 from src.analysis.focus_engine import FocusEngine
 from src.analysis.quality_engine import QualityEngine
 from src.pipeline.pipeline import Pipeline
@@ -138,7 +139,7 @@ class MainWindow(QMainWindow):
     # ═══════════════════════════════════════════════════════════════
 
     def _build_ui(self):
-        self.setWindowTitle("VyuhaAI Image Viewer")
+        self.setWindowTitle(branding.WINDOW_TITLE)
         self.setMinimumSize(700, 450)   # hard floor — never forced bigger by docks
         # Prevent Qt from auto-resizing the main window when docks appear/disappear
         self.setDockOptions(
@@ -412,7 +413,7 @@ class MainWindow(QMainWindow):
         sb.setSizeGripEnabled(True)
 
         # Left: filename + metrics
-        self._status_main = QLabel("VyuhaAI Image Viewer  —  Open an image  (Ctrl+O)")
+        self._status_main = QLabel(branding.STATUS_DEFAULT)
         self._status_main.setStyleSheet("color: #8888AA; padding: 0 8px;")
 
         # Right: zoom level
@@ -1831,14 +1832,14 @@ class MainWindow(QMainWindow):
 
     def _save_pipeline(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Pipeline", "", "VyuhaAI Pipeline (*.pipeline)"
+            self, "Save Pipeline", "", branding.PIPELINE_EXT
         )
         if path:
             self.pipeline.save(path)
 
     def _load_pipeline(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Pipeline", "", "VyuhaAI Pipeline (*.pipeline)"
+            self, "Load Pipeline", "", branding.PIPELINE_EXT
         )
         if path:
             self.pipeline.load(path)
