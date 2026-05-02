@@ -10,9 +10,20 @@ class UnsharpMaskFilter(BaseFilter):
     CATEGORY = "Sharpening & Edge"
 
     def _define_params(self):
-        self.params["radius"]    = FilterParam("radius",    "Radius",    "float", 1.0, 0.5, 10.0, 0.5)
-        self.params["strength"]  = FilterParam("strength",  "Strength",  "float", 1.5, 0.0,  5.0, 0.1)
-        self.params["threshold"] = FilterParam("threshold", "Threshold", "int",   0,   0,    50,   1)
+        self.params["radius"]    = FilterParam("radius",    "Radius",    "float", 1.0, 0.5, 10.0, 0.5,
+            description="Blur radius used to create the unsharp mask. "
+                        "Larger radius sharpens broader, lower-frequency edges. "
+                        "Smaller radius sharpens fine detail and micro-texture. "
+                        "Typical: 1.0–2.0. For scratches/pits: 0.5–1.0.")
+        self.params["strength"]  = FilterParam("strength",  "Strength",  "float", 1.5, 0.0,  5.0, 0.1,
+            description="How much sharpening is applied. "
+                        "1.0 = subtle. 2.0 = strong. > 3.0 = aggressive, may create halos. "
+                        "Typical: 1.5 for defect inspection. Reduce if noise is amplified.")
+        self.params["threshold"] = FilterParam("threshold", "Threshold", "int",   0,   0,    50,   1,
+            description="Minimum edge contrast required before sharpening is applied. "
+                        "0 = sharpen everything including noise. "
+                        "5–10 = skip smooth areas and noise, sharpen only real edges. "
+                        "Use > 0 on noisy images to avoid amplifying grain.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_8bit(image)
@@ -32,9 +43,18 @@ class CannyEdgeFilter(BaseFilter):
     CATEGORY = "Sharpening & Edge"
 
     def _define_params(self):
-        self.params["threshold1"] = FilterParam("threshold1", "Low Threshold",  "int", 50,  0, 500, 5)
-        self.params["threshold2"] = FilterParam("threshold2", "High Threshold", "int", 150, 0, 500, 5)
-        self.params["aperture"]   = FilterParam("aperture",   "Aperture Size",  "choice", 3, choices=[3, 5, 7])
+        self.params["threshold1"] = FilterParam("threshold1", "Low Threshold",  "int", 50,  0, 500, 5,
+            description="Weak edge threshold. Pixels with gradient below this are discarded as background. "
+                        "Pixels between Low and High are kept only if connected to a strong edge. "
+                        "Lower = more edges detected (more noise). Typical: 30–80.")
+        self.params["threshold2"] = FilterParam("threshold2", "High Threshold", "int", 150, 0, 500, 5,
+            description="Strong edge threshold. Pixels above this are always kept as edges. "
+                        "Ratio of High:Low should be 2:1 or 3:1 for best results. "
+                        "Higher = fewer, cleaner edges. Typical: 100–200.")
+        self.params["aperture"]   = FilterParam("aperture",   "Aperture Size",  "choice", 3, choices=[3, 5, 7],
+            description="Sobel kernel size used for gradient computation. "
+                        "3 = fast, good for fine detail. 5 = smoother, less noise-sensitive. "
+                        "7 = largest, best for broad edges. Default 3 works for most inspection tasks.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         gray = _to_gray_8bit(image)
@@ -52,8 +72,16 @@ class SobelEdgeFilter(BaseFilter):
     CATEGORY = "Sharpening & Edge"
 
     def _define_params(self):
-        self.params["direction"] = FilterParam("direction", "Direction", "choice", "combined", choices=["x", "y", "combined"])
-        self.params["ksize"]     = FilterParam("ksize",     "Kernel",    "choice", 3,           choices=[3, 5, 7])
+        self.params["direction"] = FilterParam("direction", "Direction", "choice", "combined", choices=["x", "y", "combined"],
+            description="Which edge direction to detect. "
+                        "X = vertical edges (left-right transitions). "
+                        "Y = horizontal edges (top-bottom transitions). "
+                        "Combined = magnitude of both X and Y — finds edges in all directions. "
+                        "Use Combined for general inspection; X or Y to isolate cracks in one direction.")
+        self.params["ksize"]     = FilterParam("ksize",     "Kernel",    "choice", 3,           choices=[3, 5, 7],
+            description="Sobel kernel size. Larger kernels smooth out noise before computing gradient. "
+                        "3 = sharp, sensitive to fine edges. 5 = balanced. 7 = broad edges only. "
+                        "Use 3 for precision inspection; 5 or 7 for noisy images.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         gray = _to_gray_8bit(image)
@@ -78,7 +106,11 @@ class LaplacianSharpenFilter(BaseFilter):
     CATEGORY = "Sharpening & Edge"
 
     def _define_params(self):
-        self.params["strength"] = FilterParam("strength", "Strength", "float", 1.0, 0.1, 5.0, 0.1)
+        self.params["strength"] = FilterParam("strength", "Strength", "float", 1.0, 0.1, 5.0, 0.1,
+            description="Amount of Laplacian edge enhancement added to the image. "
+                        "1.0 = moderate sharpening. 2.0+ = strong. "
+                        "Unlike Unsharp Mask, this uses second-order derivatives — more sensitive to sharp discontinuities. "
+                        "Excellent for revealing micro-cracks and pit edges. May amplify noise on rough surfaces.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_8bit(image)
@@ -99,8 +131,15 @@ class DoGFilter(BaseFilter):
     CATEGORY = "Sharpening & Edge"
 
     def _define_params(self):
-        self.params["sigma1"] = FilterParam("sigma1", "Sigma 1 (fine)",   "float", 1.0, 0.5, 10.0, 0.5)
-        self.params["sigma2"] = FilterParam("sigma2", "Sigma 2 (coarse)", "float", 2.0, 1.0, 20.0, 0.5)
+        self.params["sigma1"] = FilterParam("sigma1", "Sigma 1 (fine)",   "float", 1.0, 0.5, 10.0, 0.5,
+            description="Fine-scale Gaussian blur sigma. Controls the scale of the narrow filter. "
+                        "Smaller = captures very fine detail / high-frequency edges. "
+                        "Must be smaller than Sigma 2. Typical: 1.0.")
+        self.params["sigma2"] = FilterParam("sigma2", "Sigma 2 (coarse)", "float", 2.0, 1.0, 20.0, 0.5,
+            description="Coarse-scale Gaussian blur sigma. Controls the scale of the wide filter. "
+                        "The DoG result = fine blur minus coarse blur — isolates a frequency band. "
+                        "Ratio of Sigma2:Sigma1 ≈ 1.6 mimics the human visual system (Marr-Hildreth). "
+                        "Increase gap between sigma1 and sigma2 to detect broader features.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         gray = _to_gray_8bit(image).astype(np.float32)
@@ -122,7 +161,11 @@ class MorphGradientFilter(BaseFilter):
     CATEGORY = "Sharpening & Edge"
 
     def _define_params(self):
-        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 3, 3, 21, 2)
+        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 3, 3, 21, 2,
+            description="Structuring element size for morphological gradient (dilation minus erosion). "
+                        "Result highlights the boundary / edge of every object at the specified scale. "
+                        "3 = thin, sharp boundaries. 9+ = thick outlines. "
+                        "Particularly useful for detecting raised or recessed features on machined surfaces.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_gray_8bit(image)

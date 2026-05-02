@@ -57,6 +57,8 @@ class FilterLayerWidget(QWidget):
             row = QHBoxLayout()
             label = QLabel(param.label)
             label.setFixedWidth(100)
+            if param.description:
+                label.setToolTip(param.description)
             row.addWidget(label)
             widget = self._build_param_widget(name, param)
             row.addWidget(widget)
@@ -65,11 +67,11 @@ class FilterLayerWidget(QWidget):
         self.setStyleSheet("background: #2a2a2a; border-radius: 4px;")
 
     def _build_param_widget(self, name: str, param: FilterParam) -> QWidget:
+        tip = param.description
         if param.type == "bool":
             w = QCheckBox()
             w.setChecked(bool(param.value))
             w.stateChanged.connect(lambda v, n=name: self._set_and_emit(n, bool(v)))
-            return w
         elif param.type == "choice":
             w = QComboBox()
             for c in param.choices:
@@ -81,14 +83,12 @@ class FilterLayerWidget(QWidget):
             w.currentTextChanged.connect(lambda v, n=name, p=param: self._set_and_emit(
                 n, type(p.value)(v) if not isinstance(p.value, str) else v
             ))
-            return w
         elif param.type == "int":
             w = QSpinBox()
             w.setRange(int(param.min_val or 0), int(param.max_val or 9999))
             w.setSingleStep(int(param.step or 1))
             w.setValue(int(param.value))
             w.valueChanged.connect(lambda v, n=name: self._set_and_emit(n, v))
-            return w
         else:  # float
             w = QDoubleSpinBox()
             w.setRange(float(param.min_val or 0), float(param.max_val or 9999))
@@ -96,7 +96,9 @@ class FilterLayerWidget(QWidget):
             w.setDecimals(2)
             w.setValue(float(param.value))
             w.valueChanged.connect(lambda v, n=name: self._set_and_emit(n, v))
-            return w
+        if tip:
+            w.setToolTip(tip)
+        return w
 
     def _set_and_emit(self, name: str, value):
         self.filter.set_param(name, value)

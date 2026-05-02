@@ -10,7 +10,11 @@ class GaussianBlurFilter(BaseFilter):
     CATEGORY = "Smoothing & Noise"
 
     def _define_params(self):
-        self.params["sigma"] = FilterParam("sigma", "Sigma", "float", 1.0, 0.5, 20.0, 0.5)
+        self.params["sigma"] = FilterParam("sigma", "Sigma", "float", 1.0, 0.5, 20.0, 0.5,
+            description="Standard deviation of the Gaussian kernel — controls blur radius. "
+                        "1.0 = gentle smoothing of single-pixel noise. "
+                        "3.0+ = heavy blur, removes fine texture. "
+                        "Use low values (0.5–1.5) before edge detection to suppress camera noise without losing edges.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         s = self.get_param("sigma")
@@ -24,7 +28,11 @@ class MedianFilter(BaseFilter):
     CATEGORY = "Smoothing & Noise"
 
     def _define_params(self):
-        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "choice", 3, choices=[3, 5, 7, 9, 11, 15, 21])
+        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "choice", 3, choices=[3, 5, 7, 9, 11, 15, 21],
+            description="Size of the median filter window (pixels). "
+                        "Replaces each pixel with the median of its neighbors — preserves edges better than Gaussian. "
+                        "3 = removes isolated hot/cold pixels. 5–7 = removes salt-and-pepper noise. "
+                        "9+ = heavy smoothing. Best choice for removing impulse noise (stuck pixels, dust).")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         k = self.get_param("ksize")
@@ -36,9 +44,19 @@ class BilateralFilter(BaseFilter):
     CATEGORY = "Smoothing & Noise"
 
     def _define_params(self):
-        self.params["diameter"]    = FilterParam("diameter",    "Diameter",     "int",   9,   3, 25, 2)
-        self.params["sigma_color"] = FilterParam("sigma_color", "Sigma Color",  "float", 75, 10, 200, 5)
-        self.params["sigma_space"] = FilterParam("sigma_space", "Sigma Space",  "float", 75, 10, 200, 5)
+        self.params["diameter"]    = FilterParam("diameter",    "Diameter",     "int",   9,   3, 25, 2,
+            description="Pixel neighborhood size. Larger = more smoothing but slower. "
+                        "5 = fast, subtle. 9 = balanced (recommended). 15+ = strong but slow. "
+                        "Bilateral filter preserves sharp edges while smoothing flat regions — ideal for pre-inspection denoising.")
+        self.params["sigma_color"] = FilterParam("sigma_color", "Sigma Color",  "float", 75, 10, 200, 5,
+            description="Color space similarity range. "
+                        "Pixels within this intensity range of the center pixel are included in the average. "
+                        "High (> 100) = aggressive smoothing across larger intensity differences. "
+                        "Low (< 30) = only smooth pixels of very similar brightness — preserve more edge contrast.")
+        self.params["sigma_space"] = FilterParam("sigma_space", "Sigma Space",  "float", 75, 10, 200, 5,
+            description="Spatial distance weighting. Controls how far spatially pixels can be and still influence the result. "
+                        "High = larger area of influence (more blur). Low = only nearest neighbors. "
+                        "Usually set equal to Sigma Color. Typical: 75.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         d  = self.get_param("diameter")
@@ -52,9 +70,19 @@ class NLMeansFilter(BaseFilter):
     CATEGORY = "Smoothing & Noise"
 
     def _define_params(self):
-        self.params["h"]          = FilterParam("h",          "H Strength",      "float", 10.0, 1.0, 50.0, 1.0)
-        self.params["template_w"] = FilterParam("template_w", "Template Window", "int",   7,    3,   21,   2)
-        self.params["search_w"]   = FilterParam("search_w",   "Search Window",   "int",   21,   7,   63,   2)
+        self.params["h"]          = FilterParam("h",          "H Strength",      "float", 10.0, 1.0, 50.0, 1.0,
+            description="Filter strength. Controls how aggressively noise is removed. "
+                        "Higher = more noise removed but also more fine detail lost. "
+                        "3–5 = preserve texture. 10 = balanced. 20+ = heavy smoothing. "
+                        "Best denoising algorithm for inspection — non-local averaging preserves structure that bilateral misses.")
+        self.params["template_w"] = FilterParam("template_w", "Template Window", "int",   7,    3,   21,   2,
+            description="Size of the patch used to compare similarity between regions. "
+                        "7×7 is standard. Larger = more context for comparison but slower. "
+                        "Increase if the surface has large repeating texture patterns.")
+        self.params["search_w"]   = FilterParam("search_w",   "Search Window",   "int",   21,   7,   63,   2,
+            description="How far (in pixels) to search for similar patches. "
+                        "21 = search 21×21 area around each pixel. Larger = better quality but significantly slower. "
+                        "For high-resolution industrial cameras, 35–63 gives better results.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_8bit(image)
@@ -71,8 +99,15 @@ class TopHatFilter(BaseFilter):
     CATEGORY = "Morphological"
 
     def _define_params(self):
-        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 15, 3, 51, 2)
-        self.params["shape"] = FilterParam("shape", "Shape", "choice", "ellipse", choices=["rect", "ellipse", "cross"])
+        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 15, 3, 51, 2,
+            description="Structuring element size. "
+                        "Top-Hat = original minus morphological opening. "
+                        "Reveals bright features smaller than the kernel — highlights bright spots, protrusions, scratches on dark background. "
+                        "Set larger than the defect size for best isolation. Typical: 15–25 for pits/protrusions.")
+        self.params["shape"] = FilterParam("shape", "Shape", "choice", "ellipse", choices=["rect", "ellipse", "cross"],
+            description="Shape of the structuring element. "
+                        "Ellipse = most natural, preferred for circular or arbitrary features. "
+                        "Rect = sensitive to axis-aligned features. Cross = only affects horizontal/vertical structures.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_gray_8bit(image)
@@ -91,8 +126,15 @@ class BlackHatFilter(BaseFilter):
     CATEGORY = "Morphological"
 
     def _define_params(self):
-        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 15, 3, 51, 2)
-        self.params["shape"] = FilterParam("shape", "Shape", "choice", "ellipse", choices=["rect", "ellipse", "cross"])
+        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 15, 3, 51, 2,
+            description="Structuring element size. "
+                        "Black-Hat = morphological closing minus original. "
+                        "Reveals dark features smaller than the kernel — highlights voids, pits, scratches on bright background. "
+                        "Complement of Top-Hat: use Black-Hat when defects are darker than the surface.")
+        self.params["shape"] = FilterParam("shape", "Shape", "choice", "ellipse", choices=["rect", "ellipse", "cross"],
+            description="Shape of the structuring element. "
+                        "Ellipse = most natural, preferred for circular or arbitrary features. "
+                        "Rect = sensitive to axis-aligned features. Cross = only affects horizontal/vertical structures.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_gray_8bit(image)
@@ -111,7 +153,11 @@ class MorphOpenFilter(BaseFilter):
     CATEGORY = "Morphological"
 
     def _define_params(self):
-        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 5, 3, 31, 2)
+        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 5, 3, 31, 2,
+            description="Structuring element size (erosion then dilation). "
+                        "Removes bright noise spots smaller than kernel. Separates touching objects. "
+                        "Used in defect detection pipeline to eliminate isolated false-positive pixels before blob counting. "
+                        "Set to the minimum defect size to preserve real defects while removing noise.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_8bit(image)
@@ -125,7 +171,11 @@ class MorphCloseFilter(BaseFilter):
     CATEGORY = "Morphological"
 
     def _define_params(self):
-        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 5, 3, 31, 2)
+        self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 5, 3, 31, 2,
+            description="Structuring element size (dilation then erosion). "
+                        "Fills small dark holes inside bright objects. Joins nearby blobs. "
+                        "Used after thresholding to merge fragmented defect blobs into one solid region. "
+                        "A scratch with small gaps will be joined into a single blob for correct area measurement.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         img8 = _to_8bit(image)

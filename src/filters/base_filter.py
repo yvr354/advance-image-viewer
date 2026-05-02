@@ -16,6 +16,7 @@ class FilterParam:
     max_val: Any = None
     step: Any = None
     choices: list = field(default_factory=list)
+    description: str = ""   # shown as tooltip on hover
 
 
 class BaseFilter(ABC):

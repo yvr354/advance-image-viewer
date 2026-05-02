@@ -257,14 +257,14 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.RightDockWidgetArea,
         )
 
-        # ── Pipeline dock (bottom) ─────────────────────────────────
+        # ── Pipeline dock (right) ─────────────────────────────────
         self.pipeline_panel = PipelinePanel(self.pipeline)
         self._dock_pipeline = self._make_dock(
-            "⚙  Processing Pipeline — Filters & Effects",
+            "⚙  Filters & Effects",
             self.pipeline_panel,
-            Qt.DockWidgetArea.BottomDockWidgetArea,
+            Qt.DockWidgetArea.RightDockWidgetArea,
         )
-        self._dock_pipeline.setMinimumHeight(200)
+        self._dock_pipeline.setMinimumWidth(260)
 
         # ── Browser dock (left) ────────────────────────────────────
         self.browser = BrowserPanel()
@@ -284,12 +284,12 @@ class MainWindow(QMainWindow):
         )
         self.tabifyDockWidget(self._dock_inspector, self._dock_focus)
 
-        # ── Fusion dock (bottom, tabbed with pipeline) ────────────────
+        # ── Fusion dock (right, tabbed with pipeline) ────────────────
         self.fusion_panel = FusionPanel()
         self._dock_fusion = self._make_dock(
-            "⊕  Illumination Fusion — Multi-Light Composite",
+            "⊕  Illumination Fusion",
             self.fusion_panel,
-            Qt.DockWidgetArea.BottomDockWidgetArea,
+            Qt.DockWidgetArea.RightDockWidgetArea,
         )
         self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
 
@@ -1906,12 +1906,13 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,   self._dock_browser)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,  self._dock_inspector)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,  self._dock_focus)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_pipeline)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_fusion)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock_pipeline)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock_fusion)
 
-        # Re-tab right docks and bottom docks
+        # Tab all right-side docks together
         self.tabifyDockWidget(self._dock_inspector, self._dock_focus)
-        self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
+        self.tabifyDockWidget(self._dock_inspector, self._dock_pipeline)
+        self.tabifyDockWidget(self._dock_inspector, self._dock_fusion)
 
         # Raise default tabs
         self._dock_inspector.raise_()

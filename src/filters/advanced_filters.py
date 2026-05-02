@@ -30,13 +30,37 @@ class GaborBankFilter(BaseFilter):
     CATEGORY = "Texture Analysis"
 
     def _define_params(self):
-        self.params["frequency"]    = FilterParam("frequency",    "Frequency",      "float", 0.15, 0.02, 0.50, 0.01)
-        self.params["orientations"] = FilterParam("orientations", "Orientations",   "int",   6,    2,    12,   1)
-        self.params["scales"]       = FilterParam("scales",       "Scales",         "int",   3,    1,    6,    1)
-        self.params["sigma_x"]      = FilterParam("sigma_x",      "Sigma X",        "float", 4.0,  1.0,  20.0, 0.5)
-        self.params["sigma_y"]      = FilterParam("sigma_y",      "Sigma Y",        "float", 4.0,  1.0,  20.0, 0.5)
-        self.params["combine"]      = FilterParam("combine",      "Combine Mode",   "choice", "max", choices=["max", "mean", "sum", "energy"])
-        self.params["normalize"]    = FilterParam("normalize",    "Normalize",      "bool",  True)
+        self.params["frequency"]    = FilterParam("frequency",    "Frequency",      "float", 0.15, 0.02, 0.50, 0.01,
+            description="Spatial frequency of the Gabor sinusoidal carrier wave (cycles per pixel). "
+                        "0.05 = responds to coarse, low-frequency texture. "
+                        "0.25 = responds to fine, high-frequency texture. "
+                        "Match to the period of the surface texture you want to detect.")
+        self.params["orientations"] = FilterParam("orientations", "Orientations",   "int",   6,    2,    12,   1,
+            description="Number of equally-spaced filter orientations (0°–180°). "
+                        "6 = detects texture defects at 0°, 30°, 60°, 90°, 120°, 150°. "
+                        "More orientations = catches defects at any angle but slower. "
+                        "2 = horizontal/vertical only. 8–12 for truly isotropic detection.")
+        self.params["scales"]       = FilterParam("scales",       "Scales",         "int",   3,    1,    6,    1,
+            description="Number of frequency scales. Each scale analyzes a different feature size. "
+                        "1 = single scale (fastest). 3 = multi-scale (catches small and large defects). "
+                        "Higher = more comprehensive but slower. Typical: 2–3 for industrial inspection.")
+        self.params["sigma_x"]      = FilterParam("sigma_x",      "Sigma X",        "float", 4.0,  1.0,  20.0, 0.5,
+            description="Gaussian envelope width along the filter's major axis (orientation direction). "
+                        "Controls how elongated the filter is in the preferred orientation. "
+                        "Larger = longer, more directional filter — good for detecting streaks and grooves.")
+        self.params["sigma_y"]      = FilterParam("sigma_y",      "Sigma Y",        "float", 4.0,  1.0,  20.0, 0.5,
+            description="Gaussian envelope width perpendicular to the orientation. "
+                        "Sigma Y / Sigma X ratio controls aspect ratio: "
+                        "Equal = round filter. Sigma Y < Sigma X = highly directional bar filter.")
+        self.params["combine"]      = FilterParam("combine",      "Combine Mode",   "choice", "max", choices=["max", "mean", "sum", "energy"],
+            description="How to combine responses across all orientations and scales. "
+                        "Max = highlight strongest defect signal at any orientation (recommended for inspection). "
+                        "Mean = average response (smoother but may miss sharp features). "
+                        "Energy = square root of sum of squares — theoretically optimal but slower.")
+        self.params["normalize"]    = FilterParam("normalize",    "Normalize",      "bool",  True,
+            description="Normalize output to 0–255 display range. "
+                        "On = consistent visible contrast regardless of filter strength. "
+                        "Off = preserve raw response magnitudes for quantitative measurement.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         gray = _to_gray_f32(image)
@@ -100,11 +124,22 @@ class WaveletFilter(BaseFilter):
     CATEGORY = "Texture Analysis"
 
     def _define_params(self):
-        self.params["level"]   = FilterParam("level",   "Level",      "int",    2,   1, 5,  1)
+        self.params["level"]   = FilterParam("level",   "Level",      "int",    2,   1, 5,  1,
+            description="Number of decomposition levels. Each level halves spatial resolution and doubles scale. "
+                        "Level 1 = finest detail. Level 2 = medium features. Level 3+ = coarse structure. "
+                        "Use level 1–2 for fine surface defects; level 3–4 for large cracks or shape errors.")
         self.params["subband"] = FilterParam("subband", "Show Band",  "choice", "detail_all",
                                              choices=["approximation", "horizontal", "vertical",
-                                                      "diagonal", "detail_all", "all_levels"])
-        self.params["enhance"] = FilterParam("enhance", "Enhance",    "bool",   True)
+                                                      "diagonal", "detail_all", "all_levels"],
+            description="Which frequency subband to display. "
+                        "Approximation = low-frequency content (shape). "
+                        "Horizontal = horizontal edge detail. Vertical = vertical edge detail. Diagonal = diagonal detail. "
+                        "detail_all = maximum of all three detail subbands at the selected level (recommended for defect inspection). "
+                        "all_levels = maximum across all scales — broadest defect sensitivity.")
+        self.params["enhance"] = FilterParam("enhance", "Enhance",    "bool",   True,
+            description="Apply histogram equalization to the output for improved contrast. "
+                        "On = automatically boosts low-contrast detail for visual inspection. "
+                        "Off = show raw wavelet coefficient magnitudes.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         gray = _to_gray_f32(image)
@@ -197,10 +232,26 @@ class FFTMagnitudeFilter(BaseFilter):
 
     def _define_params(self):
         self.params["mode"]       = FilterParam("mode",       "Display Mode", "choice", "magnitude",
-                                                choices=["magnitude", "phase", "lowpass", "highpass", "bandpass"])
-        self.params["cutoff_low"]  = FilterParam("cutoff_low",  "Low Cutoff",  "float", 0.1, 0.01, 0.5, 0.01)
-        self.params["cutoff_high"] = FilterParam("cutoff_high", "High Cutoff", "float", 0.4, 0.05, 1.0, 0.01)
-        self.params["log_scale"]   = FilterParam("log_scale",   "Log Scale",   "bool",  True)
+                                                choices=["magnitude", "phase", "lowpass", "highpass", "bandpass"],
+            description="What to display or compute from the FFT. "
+                        "Magnitude = power spectrum — bright spots away from center indicate periodic defects (banding, moire). "
+                        "Phase = phase spectrum — shows spatial structure. "
+                        "Lowpass = apply low-pass filter and reconstruct (blurs). "
+                        "Highpass = apply high-pass filter (sharpens, reveals fine defects). "
+                        "Bandpass = keep only frequencies between Low and High Cutoff.")
+        self.params["cutoff_low"]  = FilterParam("cutoff_low",  "Low Cutoff",  "float", 0.1, 0.01, 0.5, 0.01,
+            description="Lower frequency boundary (fraction of Nyquist frequency, 0–0.5). "
+                        "Used in Highpass and Bandpass modes. Frequencies below this are suppressed. "
+                        "0.1 = suppress DC and very low frequencies (large illumination gradients).")
+        self.params["cutoff_high"] = FilterParam("cutoff_high", "High Cutoff", "float", 0.4, 0.05, 1.0, 0.01,
+            description="Upper frequency boundary (fraction of Nyquist, 0–1.0). "
+                        "Used in Lowpass and Bandpass modes. Frequencies above this are suppressed. "
+                        "0.4 = preserve spatial detail up to 2.5× the Nyquist. "
+                        "Decrease to smooth, increase to sharpen.")
+        self.params["log_scale"]   = FilterParam("log_scale",   "Log Scale",   "bool",  True,
+            description="Display magnitude on a logarithmic scale. "
+                        "On = compresses the wide dynamic range of FFT magnitudes for visibility (recommended). "
+                        "Off = linear scale — DC component dominates, fine detail invisible.")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         gray = _to_gray_f32(image)
@@ -263,9 +314,20 @@ class LBPTextureFilter(BaseFilter):
     CATEGORY = "Texture Analysis"
 
     def _define_params(self):
-        self.params["radius"]  = FilterParam("radius",  "Radius",  "int", 3, 1, 10, 1)
-        self.params["points"]  = FilterParam("points",  "Points",  "int", 8, 4, 24, 4)
-        self.params["uniform"] = FilterParam("uniform", "Uniform Only", "bool", False)
+        self.params["radius"]  = FilterParam("radius",  "Radius",  "int", 3, 1, 10, 1,
+            description="Radius of the sampling circle around each pixel. "
+                        "Controls the scale of texture being analyzed. "
+                        "1–2 = micro-texture (surface finish, grain). 3–5 = meso-texture (weave, pattern). "
+                        "Match radius to the size of the texture unit you want to characterize.")
+        self.params["points"]  = FilterParam("points",  "Points",  "int", 8, 4, 24, 4,
+            description="Number of sampling points evenly distributed on the circle. "
+                        "More points = finer angular resolution but slower. "
+                        "8 = standard (LBP8,1 or LBP8,3). 16–24 = high-precision texture discrimination. "
+                        "Increasing points distinguishes more texture micropatterns.")
+        self.params["uniform"] = FilterParam("uniform", "Uniform Only", "bool", False,
+            description="Uniform LBP patterns have at most 2 bitwise transitions (0→1 or 1→0) in the binary code. "
+                        "On = keep only uniform patterns (represent 90% of real textures) — reduces noise in classification. "
+                        "Off = show all LBP codes including non-uniform (useful for detecting irregular defect regions).")
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         gray = _to_gray_u8(image)
