@@ -123,33 +123,68 @@ class AnalysisWorker(QThread):
                 b = cv2.resize(b, (a.shape[1], a.shape[0]),
                                interpolation=cv2.INTER_LINEAR)
 
-            # ── Blend / Signed: compute and return immediately ────────────
-            if self._mode == "Blend 50/50":
-                ra = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB) if a.ndim == 2 else a
-                rb = cv2.cvtColor(b, cv2.COLOR_GRAY2RGB) if b.ndim == 2 else b
-                out = cv2.addWeighted(ra, 0.5, rb, 0.5, 0)
-                empty_metrics = {"pixel_diff": 0, "max_dev": 0, "mean_dev": 0,
-                                 "ssim": None, "psnr": None, "n_defects": 0,
-                                 "auto_norm": False, "verdict": "—"}
-                self.done.emit(out, out, empty_metrics, [])
-                return
-
-            if self._mode == "Signed ±128":
-                ag2 = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY) if a.ndim == 3 else a
-                bg2 = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY) if b.ndim == 3 else b
-                signed = np.clip(
-                    ag2.astype(np.int16) - bg2.astype(np.int16) + 128, 0, 255
-                ).astype(np.uint8)
-                bgr = cv2.applyColorMap(signed, cv2.COLORMAP_COOLWARM)
-                out = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                empty_metrics = {"pixel_diff": 0, "max_dev": 0, "mean_dev": 0,
-                                 "ssim": None, "psnr": None, "n_defects": 0,
-                                 "auto_norm": False, "verdict": "—"}
-                self.done.emit(out, out, empty_metrics, [])
-                return
-
+            # Convert to grayscale for normalize + align (shared by all modes)
             ag = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY) if a.ndim == 3 else a
             bg = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY) if b.ndim == 3 else b
+
+            # ── 0a. Normalize brightness — match B mean luminance to A ────
+            mean_a = float(np.mean(ag))
+            mean_b = float(np.mean(bg))
+            if mean_b > 1:
+                scale = float(np.clip(mean_a / mean_b, 0.5, 2.0))
+                bg = np.clip(bg.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+                b  = np.clip(b.astype(np.float32)  * scale, 0, 255).astype(np.uint8)
+
+            # ── 0b. Auto-align B onto A using ORB feature matching ────────
+            did_align = False
+            try:
+                orb  = cv2.ORB_create(500)
+                kp1, des1 = orb.detectAndCompute(ag, None)
+                kp2, des2 = orb.detectAndCompute(bg, None)
+                if (des1 is not None and des2 is not None
+                        and len(kp1) >= 4 and len(kp2) >= 4):
+                    bf      = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+                    matches = sorted(bf.match(des1, des2),
+                                     key=lambda m: m.distance)[:50]
+                    if len(matches) >= 4:
+                        src = np.float32(
+                            [kp2[m.trainIdx].pt for m in matches]
+                        ).reshape(-1, 1, 2)
+                        dst = np.float32(
+                            [kp1[m.queryIdx].pt for m in matches]
+                        ).reshape(-1, 1, 2)
+                        H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+                        if H is not None:
+                            h, w = ag.shape
+                            bg = cv2.warpPerspective(bg, H, (w, h))
+                            b  = cv2.warpPerspective(b,  H, (w, h))
+                            did_align = True
+            except Exception:
+                pass
+
+            _empty = {"pixel_diff": 0, "max_dev": 0, "mean_dev": 0,
+                      "ssim": None, "psnr": None, "n_defects": 0,
+                      "auto_norm": False, "aligned": did_align, "verdict": "—"}
+
+            # ── Blend: early return ───────────────────────────────────────
+            if self._mode == "Blend 50/50":
+                ra  = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB) if a.ndim == 2 else a
+                rb  = cv2.cvtColor(b, cv2.COLOR_GRAY2RGB) if b.ndim == 2 else b
+                out = cv2.addWeighted(ra, 0.5, rb, 0.5, 0)
+                self.done.emit(out, out, _empty, [])
+                return
+
+            # ── Signed ±128: early return ─────────────────────────────────
+            if self._mode == "Signed ±128":
+                signed = np.clip(
+                    ag.astype(np.int16) - bg.astype(np.int16) + 128, 0, 255
+                ).astype(np.uint8)
+                out = cv2.cvtColor(
+                    cv2.applyColorMap(signed, cv2.COLORMAP_COOLWARM),
+                    cv2.COLOR_BGR2RGB,
+                )
+                self.done.emit(out, out, _empty, [])
+                return
 
             # ── 1. Raw absolute difference ────────────────────────────────
             diff_raw = cv2.absdiff(ag.astype(np.int16),
@@ -163,33 +198,26 @@ class AnalysisWorker(QThread):
                 amplified = amplified * (255.0 / amp_max)
                 auto_norm = True
             amp8       = np.clip(amplified, 0, 255).astype(np.uint8)
-            diff_color = cv2.applyColorMap(amp8, cv2.COLORMAP_HOT)
-            diff_rgb   = cv2.cvtColor(diff_color, cv2.COLOR_BGR2RGB)
+            diff_rgb   = cv2.cvtColor(
+                cv2.applyColorMap(amp8, cv2.COLORMAP_HOT), cv2.COLOR_BGR2RGB
+            )
 
             # ── 3. Detection pipeline ─────────────────────────────────────
-            # Gaussian blur — removes high-frequency noise
             blurred = cv2.GaussianBlur(diff_raw, (5, 5), 1.0)
+            binary  = (blurred > self._threshold).astype(np.uint8) * 255
+            kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            opened  = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  kernel, iterations=1)
+            closed  = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-            # Threshold
-            binary = (blurred > self._threshold).astype(np.uint8) * 255
-
-            # Morphological opening — erode then dilate removes isolated noise
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-            closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-            # Connected components
             n_labels, _, stats, centroids = cv2.connectedComponentsWithStats(
                 closed, connectivity=8
             )
 
             # ── 4. Filter blobs + classify ────────────────────────────────
             defects: List[Defect] = []
-            for i in range(1, n_labels):   # 0 = background
+            for i in range(1, n_labels):
                 area = int(stats[i, cv2.CC_STAT_AREA])
-                if area < self._min_area:
-                    continue
-                if area > 200_000:          # reject image-wide artifacts
+                if area < self._min_area or area > 200_000:
                     continue
                 x  = int(stats[i, cv2.CC_STAT_LEFT])
                 y  = int(stats[i, cv2.CC_STAT_TOP])
@@ -203,18 +231,16 @@ class AnalysisWorker(QThread):
                     severity=_classify_severity(area),
                 ))
 
-            # Sort: critical first
             _order = {"CRITICAL": 0, "FUNCTIONAL": 1, "COSMETIC": 2}
             defects.sort(key=lambda d: (_order[d.severity], -d.area))
             for i, d in enumerate(defects):
                 d.idx = i + 1
 
-            # ── 5. Draw bounding boxes on annotated diff ──────────────────
+            # ── 5. Draw bounding boxes ────────────────────────────────────
             annot = diff_rgb.copy()
             for d in defects:
                 cv2.rectangle(annot, (d.x, d.y), (d.x+d.w, d.y+d.h),
                               d.color_bgr, 2)
-                # Label background
                 label = f"#{d.idx} {d.severity[:4]}"
                 (tw, th), _ = cv2.getTextSize(
                     label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1
@@ -226,22 +252,19 @@ class AnalysisWorker(QThread):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
 
             # ── 6. Metrics ────────────────────────────────────────────────
-            n        = ag.size
-            pct_diff = float(np.count_nonzero(diff_raw > 5)) / n * 100
-            max_dev  = int(np.max(diff_raw))
-            mean_dev = float(np.mean(diff_raw))
-
+            pct_diff = float(np.count_nonzero(diff_raw > 5)) / ag.size * 100
             has_critical   = any(d.severity == "CRITICAL"   for d in defects)
             has_functional = any(d.severity == "FUNCTIONAL" for d in defects)
 
             metrics = {
                 "pixel_diff": pct_diff,
-                "max_dev":    max_dev,
-                "mean_dev":   mean_dev,
+                "max_dev":    int(np.max(diff_raw)),
+                "mean_dev":   float(np.mean(diff_raw)),
                 "ssim":       None,
                 "psnr":       None,
                 "n_defects":  len(defects),
                 "auto_norm":  auto_norm,
+                "aligned":    did_align,
                 "verdict":    "FAIL" if (has_critical or has_functional) else "PASS",
             }
 
@@ -258,7 +281,7 @@ class AnalysisWorker(QThread):
 
             self.done.emit(diff_rgb, annot, metrics, defects)
 
-        except Exception as e:
+        except Exception:
             pass
 
 
@@ -1012,13 +1035,16 @@ class ComparisonPanel(QWidget):
             self._defect_list.show_defects([])
             return
 
-        note = "⚡ auto-normalized" if metrics.get("auto_norm") else \
-               f"amp ×{self._amp_slider.value()}"
-        n    = metrics["n_defects"]
-        self._diff_hdr.setText(
-            f"  DIFF MAP   ·   {note}   ·   "
-            f"{'%d defect%s found' % (n,'s' if n!=1 else '') if n else 'no defects'}"
-        )
+        parts = ["  DIFF MAP"]
+        if metrics.get("aligned"):
+            parts.append("⇄ aligned")
+        if metrics.get("auto_norm"):
+            parts.append("⚡ auto-norm")
+        else:
+            parts.append(f"amp ×{self._amp_slider.value()}")
+        n = metrics["n_defects"]
+        parts.append(f"{'%d defect%s found' % (n,'s' if n!=1 else '') if n else 'no defects'}")
+        self._diff_hdr.setText("   ·   ".join(parts))
         self._diff_hdr.setStyleSheet(
             "background:#101A10; color:#44AA44; padding:3px 8px; "
             "font-size:10px; font-weight:700;"
