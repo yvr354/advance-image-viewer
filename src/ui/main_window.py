@@ -799,7 +799,7 @@ class MainWindow(QMainWindow):
             self._dock_inspector.setVisible(False)
         else:
             self._workspace.setCurrentWidget(self._image_page)
-            self._dock_browser.setVisible(mode in {"Inspect", "Focus"})
+            self._dock_browser.setVisible(mode in {"Inspect", "Focus", "Filters"})
             self._dock_inspector.setVisible(mode in {"Inspect", "Focus", "Filters", "Fusion"})
             if mode == "Filters":
                 self._dock_pipeline.setVisible(True)
