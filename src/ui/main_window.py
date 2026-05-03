@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
         self._analysis_worker: AnalysisWorker | None = None
         self._load_worker:    ImageLoadWorker | None = None
         self._pipeline_worker: PipelineWorker | None = None
+        self._pipeline_loading = False   # tracks cursor override state
         self._active_mode = "Inspect"
         self._last_focus_result = None
         self._last_quality_result = None
@@ -1066,10 +1067,14 @@ class MainWindow(QMainWindow):
         if loading:
             self._status_pipeline_lbl.setText("  ⏳ Applying filters…")
             self._status_pipeline_lbl.setVisible(True)
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            if not self._pipeline_loading:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self._pipeline_loading = True
         else:
             self._status_pipeline_lbl.setVisible(False)
-            QApplication.restoreOverrideCursor()
+            if self._pipeline_loading:
+                QApplication.restoreOverrideCursor()
+            self._pipeline_loading = False
 
     def _on_composite_ready(self, composite: np.ndarray):
         """Fusion panel produced a composite → show in viewer and 3D."""

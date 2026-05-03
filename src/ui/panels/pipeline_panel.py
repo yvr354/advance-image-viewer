@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QLabel,
     QMenu, QScrollArea, QComboBox, QSpinBox, QDoubleSpinBox, QFrame,
-    QSizePolicy,
+    QSizePolicy, QAbstractScrollArea,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -313,6 +313,7 @@ class PipelinePanel(QWidget):
         # ── Scrollable pipeline list ─────────────────────────────────
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setVerticalScrollMode(QAbstractScrollArea.ScrollMode.ScrollPerPixel)
         self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self._scroll_widget = QWidget()
         self._scroll_widget.setStyleSheet("background: transparent;")
