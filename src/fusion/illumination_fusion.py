@@ -98,6 +98,49 @@ class IlluminationFusion:
     def average_fusion(self) -> Optional[np.ndarray]:
         return self._pixel_stat("avg")
 
+    def superposition(self) -> Optional[np.ndarray]:
+        """
+        A + B + C + ... (sum, then normalise).
+        Any pixel bright in ANY light accumulates. Works with 2, 3, 4+ images.
+        Defect visible in 3 lights = 3× stronger than defect in 1 light.
+        """
+        if not self.entries:
+            return None
+        h, w = self.entries[0].image.shape[:2]
+        stack = np.stack([self._fit(e.image, h, w) for e in self.entries], axis=0)
+        return self._norm8(stack.sum(axis=0).astype(np.float64))
+
+    def multiply(self) -> Optional[np.ndarray]:
+        """
+        A × B × C × ... (product, then normalise).
+        Only pixels bright in ALL images survive — extremely selective.
+        Any image where the pixel is dark kills the result for that pixel.
+        Use to confirm defects that appear under every lighting angle.
+        Works with 2, 3, 4+ images.
+        """
+        if not self.entries:
+            return None
+        h, w = self.entries[0].image.shape[:2]
+        result = np.ones((h, w), dtype=np.float64)
+        for e in self.entries:
+            result *= self._fit(e.image, h, w).astype(np.float64) / 255.0
+        return self._norm8(result)
+
+    def range_fusion(self) -> Optional[np.ndarray]:
+        """
+        Max − Min across all images.
+        Shows which pixels change the MOST between lighting angles.
+        Flat uniform surface = same in all lights = Max≈Min → black (no defect).
+        Scratch / pit = very different per light = large Max-Min → bright white.
+        Best multi-image operation — works with 3, 4, 5+ images automatically.
+        No need to pick A and B.
+        """
+        if not self.entries:
+            return None
+        h, w = self.entries[0].image.shape[:2]
+        stack = np.stack([self._fit(e.image, h, w) for e in self.entries], axis=0).astype(np.float64)
+        return self._norm8(stack.max(axis=0) - stack.min(axis=0))
+
     def difference(self, idx_a: int = 0, idx_b: int = 1) -> Optional[np.ndarray]:
         """
         |A − B| per pixel — absolute difference between two images.

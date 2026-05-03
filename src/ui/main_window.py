@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QStackedWidget, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QKeySequence, QAction, QIcon, QShortcut
+from PyQt6.QtGui import QKeySequence, QAction, QActionGroup, QIcon, QShortcut
 
 from src.core.config import Config
 from src.core.image_data import ImageData
@@ -463,167 +463,167 @@ class MainWindow(QMainWindow):
         self.setStatusBar(sb)
 
     def _build_inspect_toolbar(self) -> QWidget:
-        """Inspection tool strip — shown only in Inspect mode."""
-        bar = QWidget()
-        bar.setFixedHeight(34)
-        bar.setStyleSheet(
+        """
+        Context-sensitive tool strip — hidden when Navigate (default).
+        Appears only when a non-navigate tool is active, showing only
+        the controls relevant to that tool.
+        Tools are selected from the Tools menu (keyboard shortcuts included).
+        """
+        _SS_BASE = (
             "QWidget { background:#0C1520; border-bottom:1px solid #1A2A3A; }"
-            "QPushButton { background:#0A1828; color:#6688AA; border:1px solid #1A2A3A; "
-            "              padding:3px 12px; font-size:10px; font-weight:600; }"
-            "QPushButton:checked { background:#00304A; color:#00E5FF; "
-            "                      border:1px solid #00B4D8; }"
-            "QPushButton:hover:!checked { background:#111F2E; color:#AACCDD; }"
+            "QPushButton { background:#0A1828; color:#6688AA; border:1px solid #1A2A3A;"
+            "  padding:3px 10px; font-size:10px; font-weight:600; border-radius:3px; }"
+            "QPushButton:hover { background:#111F2E; color:#AACCDD; }"
         )
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(8, 3, 8, 3)
-        row.setSpacing(4)
+        # Navigate = dim secondary "go back" — NOT cyan, so it never looks like the active tool
+        _SS_BACK = (
+            "QPushButton { background:#0A1420; color:#445566; border:1px solid #1A2530;"
+            "  padding:3px 12px; font-size:10px; font-weight:600; border-radius:3px; }"
+            "QPushButton:hover { background:#0E1E2E; color:#7799AA; border-color:#2A3A4A; }"
+        )
+        _SS_DANGER = (
+            "QPushButton { background:#0A1828; color:#664444; border:1px solid #2A1A1A;"
+            "  padding:3px 10px; font-size:10px; border-radius:3px; }"
+            "QPushButton:hover { color:#FF8888; background:#1A0808; }"
+        )
+        _SS_GREEN = (
+            "QPushButton { background:#0A1828; color:#44AA66; border:1px solid #1A3A2A;"
+            "  padding:3px 10px; font-size:10px; border-radius:3px; }"
+            "QPushButton:hover { color:#88FFAA; background:#0A1E14; }"
+        )
 
-        self._tool_buttons: dict[str, QPushButton] = {}
-        self._tool_group = QButtonGroup(self)
-        self._tool_group.setExclusive(True)
+        # Active tool badge — always the first widget on every page
+        # Shows which tool is active in cyan, so there is zero ambiguity
+        _TOOL_LABELS = {
+            "roi":      ("⬛  ROI",      "#00B4D8", "#001A28", "#00607A"),
+            "profile":  ("📈  Profile",  "#00B4D8", "#001A28", "#00607A"),
+            "annotate": ("📍  Annotate", "#D4840A", "#201000", "#7A4000"),
+            "measure":  ("↔  Measure",  "#2ECC71", "#001A0A", "#1A6040"),
+            "mask":     ("⬡  Mask",     "#CC88FF", "#150028", "#5A3A7A"),
+        }
+        def _active_badge(tool_id: str) -> QLabel:
+            text, fg, bg, border = _TOOL_LABELS[tool_id]
+            lbl = QLabel(f"  {text}  ")
+            lbl.setStyleSheet(
+                f"color:{fg}; background:{bg}; border:1px solid {border};"
+                f"border-radius:3px; font-size:10px; font-weight:700; padding:2px 4px;"
+            )
+            return lbl
 
-        tools = [
-            ("navigate", "↖ Navigate", "Pan & zoom — left drag pans, right drag zooms"),
-            ("roi",      "⬛ ROI",       "Draw rectangle → region stats in Inspector"),
-            ("profile",  "📈 Profile",   "Draw line → intensity chart in Inspector"),
-            ("annotate", "📍 Annotate",  "Click to place defect markers"),
-            ("measure",  "↔ Measure",   "Drag to measure distance (px / mm)"),
-            ("mask",     "⬡ Mask",      "Draw inspection region polygon — metrics computed only inside"),
-        ]
-        for tool_id, label, tip in tools:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setToolTip(tip)
-            btn.clicked.connect(lambda _, t=tool_id: self._set_inspect_tool(t))
-            self._tool_group.addButton(btn)
-            self._tool_buttons[tool_id] = btn
-            row.addWidget(btn)
+        def _nav_btn():
+            b = QPushButton("↖  Navigate")
+            b.setToolTip("Return to pan / zoom mode  (Esc)")
+            b.setStyleSheet(_SS_BACK)
+            b.clicked.connect(lambda: self._set_inspect_tool("navigate"))
+            return b
 
-        self._tool_buttons["navigate"].setChecked(True)
+        def _clear_btn():
+            b = QPushButton("✕  Clear")
+            b.setToolTip("Remove ROI, profile line, measure line, and all annotations")
+            b.setStyleSheet(_SS_DANGER)
+            b.clicked.connect(self._clear_inspect_overlays)
+            return b
 
-        row.addSpacing(12)
+        def _sep_widget():
+            f = QFrame()
+            f.setFrameShape(QFrame.Shape.VLine)
+            f.setFixedWidth(1)
+            f.setStyleSheet("background:#1A2A3A;")
+            return f
 
-        # Mask: auto-detect reflections
-        self._mask_auto_btn = QPushButton("✦ Auto-Detect")
+        def _make_page(tool_id: str, *extra_widgets) -> QWidget:
+            page = QWidget()
+            page.setStyleSheet(_SS_BASE)
+            row = QHBoxLayout(page)
+            row.setContentsMargins(8, 3, 8, 3)
+            row.setSpacing(6)
+            # Active badge first — always clear which tool is on
+            row.addWidget(_active_badge(tool_id))
+            row.addWidget(_sep_widget())
+            for w in extra_widgets:
+                row.addWidget(w)
+            row.addSpacing(16)
+            row.addWidget(_nav_btn())
+            row.addStretch()
+            return page
+
+        # ── ROI page ──────────────────────────────────────────────────
+        roi_page = _make_page("roi", _clear_btn())
+
+        # ── Profile page ──────────────────────────────────────────────
+        prof_page = _make_page("profile", _clear_btn())
+
+        # ── Annotate page ─────────────────────────────────────────────
+        ann_hint = QLabel("Annotations auto-saved alongside image file")
+        ann_hint.setStyleSheet("color:#2A3A4A; font-size:9px;")
+        ann_page = _make_page("annotate", _clear_btn(), ann_hint)
+
+        # ── Measure page ──────────────────────────────────────────────
+        self._scale_btn = QPushButton("⚙  Set Scale…")
+        self._scale_btn.setToolTip("Set mm/pixel calibration for Measure tool")
+        self._scale_btn.clicked.connect(self._set_scale_calibration)
+        meas_page = _make_page("measure", self._scale_btn, _clear_btn())
+
+        # ── Mask page ─────────────────────────────────────────────────
+        self._mask_auto_btn = QPushButton("✦  Auto-Detect")
         self._mask_auto_btn.setToolTip(
             "Automatically detect specular reflection regions\n"
             "and suggest an inspection mask that excludes them"
         )
-        self._mask_auto_btn.setCheckable(False)
-        self._mask_auto_btn.setStyleSheet(
-            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
-            "              padding:3px 10px; font-size:10px; }"
-            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
-        )
         self._mask_auto_btn.clicked.connect(self._mask_auto_detect)
-        row.addWidget(self._mask_auto_btn)
 
-        # Mask: apply to all images in folder
-        self._mask_apply_btn = QPushButton("📋 Apply to Folder")
+        self._mask_apply_btn = QPushButton("📋  Apply to Folder")
         self._mask_apply_btn.setToolTip(
             "Align and apply current mask to all images in the folder.\n"
             "Phase 1 (fixed camera): copy directly.\n"
             "Phase 3 (part moves): auto-align using edge matching."
         )
-        self._mask_apply_btn.setCheckable(False)
-        self._mask_apply_btn.setStyleSheet(
-            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
-            "              padding:3px 10px; font-size:10px; }"
-            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
-        )
         self._mask_apply_btn.clicked.connect(self._mask_apply_to_folder)
-        row.addWidget(self._mask_apply_btn)
 
-        # Find all similar regions button
-        self._mask_find_all_btn = QPushButton("⧉ Find All Similar")
+        self._mask_find_all_btn = QPushButton("⧉  Find All Similar")
         self._mask_find_all_btn.setToolTip(
             "Draw mask around ONE example region, then click this.\n"
             "Finds all identical/similar regions in the image and masks them all."
         )
-        self._mask_find_all_btn.setCheckable(False)
-        self._mask_find_all_btn.setStyleSheet(
-            "QPushButton { background:#0A1828; color:#5588AA; border:1px solid #1A2A3A; "
-            "              padding:3px 10px; font-size:10px; }"
-            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
-        )
         self._mask_find_all_btn.clicked.connect(self._mask_find_all_similar)
-        row.addWidget(self._mask_find_all_btn)
 
-        # Save mask button
-        self._mask_save_btn = QPushButton("💾 Save Mask")
+        self._mask_save_btn = QPushButton("💾  Save Mask")
         self._mask_save_btn.setToolTip(
             "Save the current mask.\n"
             "Choose: save mask position only, or export masked image file."
         )
-        self._mask_save_btn.setCheckable(False)
-        self._mask_save_btn.setStyleSheet(
-            "QPushButton { background:#0A1828; color:#44AA66; border:1px solid #1A3A2A; "
-            "              padding:3px 10px; font-size:10px; }"
-            "QPushButton:hover { color:#88FFAA; background:#0A1E14; }"
-        )
+        self._mask_save_btn.setStyleSheet(_SS_GREEN)
         self._mask_save_btn.clicked.connect(self._mask_save_dialog)
-        row.addWidget(self._mask_save_btn)
 
-        # Clear mask button
-        self._mask_clear_btn = QPushButton("⬡ Clear Mask")
+        self._mask_clear_btn = QPushButton("⬡  Clear Mask")
         self._mask_clear_btn.setToolTip("Remove inspection mask — analyze full image")
-        self._mask_clear_btn.setCheckable(False)
-        self._mask_clear_btn.setStyleSheet(
-            "QPushButton { background:#0A1828; color:#664444; border:1px solid #2A1A1A; "
-            "              padding:3px 10px; font-size:10px; }"
-            "QPushButton:hover { color:#FF8888; background:#1A0808; }"
-        )
+        self._mask_clear_btn.setStyleSheet(_SS_DANGER)
         self._mask_clear_btn.clicked.connect(self._mask_clear)
-        row.addWidget(self._mask_clear_btn)
 
-        row.addSpacing(12)
-
-        # Scale calibration button
-        self._scale_btn = QPushButton("⚙ Set Scale…")
-        self._scale_btn.setToolTip("Set mm/pixel calibration for Measure tool")
-        self._scale_btn.setCheckable(False)
-        self._scale_btn.setStyleSheet(
-            "QPushButton { background:#0A1828; color:#6688AA; border:1px solid #1A2A3A; "
-            "              padding:3px 10px; font-size:10px; }"
-            "QPushButton:hover { color:#AACCDD; background:#111F2E; }"
+        mask_page = _make_page(
+            "mask",
+            self._mask_auto_btn, self._mask_apply_btn, self._mask_find_all_btn,
+            _sep_widget(),
+            self._mask_save_btn, self._mask_clear_btn,
         )
-        self._scale_btn.clicked.connect(self._set_scale_calibration)
-        row.addWidget(self._scale_btn)
 
-        row.addSpacing(12)
+        # ── Stacked widget — one page per non-navigate tool ───────────
+        self._tool_stack = QStackedWidget()
+        self._tool_stack.addWidget(roi_page)    # 0
+        self._tool_stack.addWidget(prof_page)   # 1
+        self._tool_stack.addWidget(ann_page)    # 2
+        self._tool_stack.addWidget(meas_page)   # 3
+        self._tool_stack.addWidget(mask_page)   # 4
+        self._tool_stack.setFixedHeight(34)
 
-        # Clear overlays button
-        clear_btn = QPushButton("✕ Clear Overlays")
-        clear_btn.setToolTip("Remove ROI, profile line, measure line, and all annotations")
-        clear_btn.setCheckable(False)
-        clear_btn.setStyleSheet(
-            "QPushButton { background:#0A1828; color:#886666; border:1px solid #2A1A1A; "
-            "              padding:3px 10px; font-size:10px; }"
-            "QPushButton:hover { color:#FF8888; background:#1A1010; }"
-        )
-        clear_btn.clicked.connect(self._clear_inspect_overlays)
-        row.addWidget(clear_btn)
+        self._tool_page_idx = {
+            "roi": 0, "profile": 1, "annotate": 2, "measure": 3, "mask": 4
+        }
+        # Legacy dict — kept so existing _set_inspect_tool call sites don't break
+        self._tool_buttons: dict[str, QPushButton] = {}
 
-        row.addStretch()
-
-        # Save / load annotation hint
-        ann_lbl = QLabel("Annotations auto-saved alongside image file")
-        ann_lbl.setStyleSheet("color:#2A3A4A; font-size:9px;")
-        row.addWidget(ann_lbl)
-
-        # Wrap in scroll area — buttons scroll horizontally instead of forcing window wider
-        scroll = QScrollArea()
-        scroll.setWidget(bar)
-        scroll.setWidgetResizable(False)
-        scroll.setFixedHeight(36)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMinimumWidth(0)
-        scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        scroll.setVisible(False)
-        self._inspect_toolbar_bar = bar   # keep ref for visibility toggle
-        return scroll
+        self._tool_stack.setVisible(False)
+        return self._tool_stack
 
     # ═══════════════════════════════════════════════════════════════
     #  Signal Wiring — everything connected to everything
@@ -653,8 +653,9 @@ class MainWindow(QMainWindow):
         # Pipeline → re-process and update viewer + 3D
         self.pipeline_panel.pipeline_changed.connect(self._on_pipeline_changed)
 
-        # Fusion → send composite to viewer
+        # Fusion → send composite to viewer; height map also goes to 3D as real geometry
         self.fusion_panel.composite_ready.connect(self._on_composite_ready)
+        self.fusion_panel.height_map_ready.connect(self._on_height_map_ready)
 
         # Inspection tool signals → inspector panel updates
         self.viewer.roi_selected.connect(self._on_roi_selected)
@@ -737,12 +738,35 @@ class MainWindow(QMainWindow):
         self._action(m, "Image Comparison",
                      self._open_comparison_window, "Ctrl+M")
         m.addSeparator()
+
+        # ── Inspect tools — select from menu, toolbar appears only when active ──
+        m.addSection("Inspect Tool")
+        self._inspect_actions: dict[str, QAction] = {}
+        _inspect_tool_defs = [
+            ("navigate", "↖  Navigate  (pan / zoom)",  "Esc",  "Pan and zoom — default mode"),
+            ("roi",      "⬛  ROI",                     "R",    "Draw rectangle → region stats"),
+            ("profile",  "📈  Profile",                 "P",    "Draw line → intensity chart"),
+            ("annotate", "📍  Annotate",                "A",    "Click to place defect markers"),
+            ("measure",  "↔  Measure",                 "M",    "Drag to measure distance (px / mm)"),
+            ("mask",     "⬡  Mask",                    "K",    "Draw polygon inspection mask"),
+        ]
+        tool_group = QActionGroup(self)
+        tool_group.setExclusive(True)
+        for tool_id, label, shortcut, tip in _inspect_tool_defs:
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setShortcut(QKeySequence(shortcut))
+            a.setToolTip(tip)
+            a.triggered.connect(lambda _, t=tool_id: self._set_inspect_tool(t))
+            tool_group.addAction(a)
+            m.addAction(a)
+            self._inspect_actions[tool_id] = a
+        self._inspect_actions["navigate"].setChecked(True)
+
+        m.addSeparator()
         self._action(m, "Set Scale Calibration (mm/px)…", self._set_scale_calibration)
         self._action(m, "Clear Inspect Overlays",          self._clear_inspect_overlays)
-        m.addSeparator()
-        self._action(m, "Use Current Image as Reference",  self._set_auto_reference)
-        self._action(m, "Lock Current Image as Reference (saved)", self._lock_reference)
-        self._action(m, "Clear Focus Reference",           self._clear_reference)
+        self._action(m, "Clear Mask",                      self._mask_clear)
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
         a = QAction(label, self)
@@ -816,8 +840,7 @@ class MainWindow(QMainWindow):
         self._dock_fusion.setVisible(False)
         self._dock_focus.setVisible(False)
 
-        # Inspect toolbar only in Inspect mode; switching away resets tool to navigate
-        self._inspect_toolbar.setVisible(mode == "Inspect")
+        # Switching away from Inspect always resets to navigate (hides toolbar)
         if mode != "Inspect":
             self._set_inspect_tool("navigate")
 
@@ -1084,6 +1107,11 @@ class MainWindow(QMainWindow):
         hist_data = self.quality_engine.compute_histogram(composite)
         self.inspector.update_histogram(hist_data)
 
+    def _on_height_map_ready(self, height_img: np.ndarray):
+        """PS Height Map composed → send real geometry to 3D viewer and switch to it."""
+        self.surface_3d.set_height_map(height_img)
+        self._workspace.setCurrentWidget(self.surface_3d)
+
     def _on_pixel_hovered(self, x: int, y: int, pixel):
         """Mouse moved over viewer → update pixel inspector."""
         self.inspector.update_pixel(x, y, pixel)
@@ -1143,10 +1171,17 @@ class MainWindow(QMainWindow):
 
     def _set_inspect_tool(self, tool: str):
         self.viewer.set_tool(tool)
-        if tool in self._tool_buttons:
-            self._tool_buttons[tool].setChecked(True)
         if tool == "annotate":
             self.inspector.show_annotation_tools(True)
+        # Show/hide toolbar and switch to the right page
+        is_nav = (tool == "navigate")
+        self._inspect_toolbar.setVisible(not is_nav)
+        if not is_nav and tool in self._tool_page_idx:
+            self._tool_stack.setCurrentIndex(self._tool_page_idx[tool])
+        # Update menu action check states
+        if hasattr(self, "_inspect_actions"):
+            for t, a in self._inspect_actions.items():
+                a.setChecked(t == tool)
         self._status_main.setText(f"  Tool: {tool.upper()}  —  "
                                    + self._tool_hint(tool))
 

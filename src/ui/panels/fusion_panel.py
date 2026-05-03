@@ -226,7 +226,8 @@ class FusionRow(QWidget):
 # ── Main fusion panel ──────────────────────────────────────────────────────────
 
 class FusionPanel(QWidget):
-    composite_ready = pyqtSignal(np.ndarray)
+    composite_ready  = pyqtSignal(np.ndarray)
+    height_map_ready = pyqtSignal(np.ndarray)   # emitted when PS Height Map is composed
 
     _MODES = ["RGB Composite", "Photometric Stereo", "RTI Relight", "Max / Min / Avg"]
 
@@ -236,6 +237,7 @@ class FusionPanel(QWidget):
         self._rows:  list[FusionRow]   = []
         self._worker: _FusionWorker | None = None
         self._rti_fitted = False
+        self._pending_height_map = False   # True when the running job will produce a real height map
         self._build()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -564,10 +566,31 @@ class FusionPanel(QWidget):
         self._stat_btns: dict[str, QPushButton] = {}
 
         _STAT_TIPS = {
-            "Max":        "Pixel = brightest across all images.\nReveals bright defects, protrusions, high-reflectance spots.",
-            "Min":        "Pixel = darkest across all images.\nReveals pits, voids, shadows visible in any one light.",
-            "Average":    "Pixel = mean of all images.\nReduces noise, balances exposure.",
-            "Difference": "| Image A − Image B | per pixel.\nAnything that changed between the two lighting angles becomes bright.\nFlat background = black. Defect = white.\nMost powerful tool for finding what lighting angle reveals.",
+            "Max":          "Pixel = brightest across all images.\nReveals bright defects, protrusions, high-reflectance spots.",
+            "Min":          "Pixel = darkest across all images.\nReveals pits, voids, shadows visible in any one light.",
+            "Average":      "Pixel = mean of all images.\nReduces noise, balances exposure.",
+            "Difference":   "| Image A − Image B | per pixel.\nAnything that changed between the two lighting angles becomes bright.\nFlat background = black. Defect = white.\nMost powerful tool for finding what lighting angle reveals.",
+            "Superposition": (
+                "A + B + C + … (sum, then normalise).\n"
+                "A defect visible in 3 different lights appears 3× brighter than in 1 light.\n"
+                "Good for: confirming defects that show up under multiple angles.\n"
+                "Works with 2, 3, 4+ images automatically."
+            ),
+            "Multiply": (
+                "A × B × C × … (product, then normalise).\n"
+                "Only pixels bright in EVERY image survive — extremely selective.\n"
+                "Any image where the pixel is dark kills the result for that pixel.\n"
+                "Use to confirm defects that appear under every single lighting angle.\n"
+                "Works with 2, 3, 4+ images automatically."
+            ),
+            "Range": (
+                "Max − Min across all images.\n"
+                "Shows which pixels change the MOST between lighting angles.\n"
+                "Flat surface = same in all lights → Max ≈ Min → black (no defect).\n"
+                "Scratch / pit = very bright in one light, dark in another → bright white.\n"
+                "Best automatic multi-image defect detector — no need to pick A and B.\n"
+                "Works with 3, 4, 5+ images automatically."
+            ),
         }
 
         # Row 1: Max / Min / Average
@@ -590,6 +613,17 @@ class FusionPanel(QWidget):
         self._stat_btns["Difference"] = diff_btn
         diff_btn.clicked.connect(lambda: self._set_stat("Difference"))
         lay.addWidget(diff_btn)
+
+        # Row 3: Superposition / Multiply / Range
+        row3 = QHBoxLayout(); row3.setSpacing(3); row3.setContentsMargins(0,0,0,0)
+        for op in ["Superposition", "Multiply", "Range"]:
+            btn = QPushButton(op); btn.setCheckable(True)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setToolTip(_STAT_TIPS[op])
+            self._stat_group.addButton(btn); self._stat_btns[op] = btn
+            btn.clicked.connect(lambda _, o=op: self._set_stat(o))
+            row3.addWidget(btn)
+        lay.addLayout(row3)
 
         self._stat_btns["Max"].setChecked(True)
         self._refresh_stat_styles("Max")
@@ -751,6 +785,9 @@ class FusionPanel(QWidget):
             "Albedo":             "albedo",
             "Height Map":         "height",
         }
+        self._pending_height_map = (
+            mode == "Photometric Stereo" and self._ps_sel == "Height Map"
+        )
         if   mode == "RGB Composite":     fn = self.fusion.rgb_composite
         elif mode == "Photometric Stereo":
             out = _ps_key.get(self._ps_sel, "gradient")
@@ -764,8 +801,14 @@ class FusionPanel(QWidget):
                 idx_b = self._diff_b_combo.currentIndex()
                 fn = lambda: self.fusion.difference(idx_a, idx_b)
             else:
-                ops = {"Max": self.fusion.max_fusion, "Min": self.fusion.min_fusion,
-                       "Average": self.fusion.average_fusion}
+                ops = {
+                    "Max":          self.fusion.max_fusion,
+                    "Min":          self.fusion.min_fusion,
+                    "Average":      self.fusion.average_fusion,
+                    "Superposition": self.fusion.superposition,
+                    "Multiply":     self.fusion.multiply,
+                    "Range":        self.fusion.range_fusion,
+                }
                 fn  = ops.get(self._stat_sel, self.fusion.max_fusion)
 
         self._status.setText("⏳ Processing…")
@@ -786,6 +829,11 @@ class FusionPanel(QWidget):
         if out.ndim == 2:
             out = cv2.cvtColor(out, cv2.COLOR_GRAY2RGB)
         self.composite_ready.emit(out)
+        if self._pending_height_map:
+            # Emit grayscale height map for the 3D viewer (real surface geometry)
+            gray = result if result.ndim == 2 else cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+            self.height_map_ready.emit(gray)
+            self._pending_height_map = False
 
     def _on_failed(self, error: str):
         self._compose_btn.setEnabled(True)

@@ -1,6 +1,16 @@
 """
-3D surface visualization from a 2D image.
-Uses image intensity as height (Z) — no special hardware needed.
+3D surface visualization.
+
+Two source modes:
+  Visual mode   — pixel brightness → Z height.  Works on any image.
+                  Bright pixel appears raised; dark pixel appears recessed.
+                  No physical meaning — useful for visual overview only.
+
+  Real Geometry — Photometric Stereo height map → Z height.
+                  Each pixel's Z is the actual reconstructed surface depth
+                  from the Woodham / Frankot-Chellappa algorithm.
+                  Bright = truly raised; dark = truly recessed.
+                  Physically meaningful surface topology.
 
 Performance: computation runs in a background QThread so the UI
 never freezes. Slider changes are debounced 400ms to avoid
@@ -26,13 +36,14 @@ class SurfaceWorker(QThread):
     """Computes mesh data off the UI thread."""
     result_ready = pyqtSignal(object, object, object)  # z, colors, info_str
 
-    def __init__(self, image, ds, zs, cmap, smooth):
+    def __init__(self, image, ds, zs, cmap, smooth, is_real: bool = False):
         super().__init__()
-        self._image  = image
-        self._ds     = ds
-        self._zs     = zs
-        self._cmap   = cmap
-        self._smooth = smooth
+        self._image   = image
+        self._ds      = ds
+        self._zs      = zs
+        self._cmap    = cmap
+        self._smooth  = smooth
+        self._is_real = is_real
 
     def run(self):
         try:
@@ -48,8 +59,15 @@ class SurfaceWorker(QThread):
             z      = gray_ds.astype(np.float32) / 255.0 * self._zs * 50
             colors = self._make_colors(gray_ds, self._cmap)
             pts    = new_w * new_h
-            info   = (
-                f"Surface: {new_w}×{new_h}  ({pts:,} vertices)  |  "
+
+            if self._is_real:
+                source = "⚡ Real Surface — Photometric Stereo"
+            else:
+                source = "Visual — brightness → height"
+
+            info = (
+                f"{source}  |  "
+                f"Mesh: {new_w}×{new_h}  ({pts:,} pts)  |  "
                 f"Z scale: {self._zs:.1f}×  |  Original: {w}×{h}  |  "
                 f"Downsample: {self._ds}×  —  Drag=Rotate  Scroll=Zoom"
             )
@@ -96,9 +114,10 @@ class SurfaceWorker(QThread):
 class Surface3DPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._image:   np.ndarray | None = None
-        self._surface: gl.GLSurfacePlotItem | None = None
-        self._worker:  SurfaceWorker | None = None
+        self._image:    np.ndarray | None = None
+        self._surface:  gl.GLSurfacePlotItem | None = None
+        self._worker:   SurfaceWorker | None = None
+        self._is_real:  bool = False   # True = PS height map, False = brightness
 
         # Debounce: rebuild 400ms after the last slider/combo change
         self._debounce = QTimer()
@@ -120,7 +139,7 @@ class Surface3DPanel(QWidget):
 
         self._downsample = QSlider(Qt.Orientation.Horizontal)
         self._downsample.setRange(1, 16)
-        self._downsample.setValue(8)          # default 8× — fast first render
+        self._downsample.setValue(8)
         self._downsample.setFixedWidth(80)
         self._downsample.setToolTip(TIP["3d_downsample"])
         self._downsample.valueChanged.connect(self._schedule_update)
@@ -169,11 +188,19 @@ class Surface3DPanel(QWidget):
         grid.setColor((40, 40, 60, 80))
         self._view.addItem(grid)
 
+        # Right panel — source badge + reference image
         ref_panel = QWidget()
         ref_layout = QVBoxLayout(ref_panel)
         ref_layout.setContentsMargins(8, 0, 0, 0)
         ref_layout.setSpacing(6)
-        self._ref_title = QLabel("Original Image")
+
+        self._source_badge = QLabel("")
+        self._source_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._source_badge.setWordWrap(True)
+        self._source_badge.setVisible(False)
+        ref_layout.addWidget(self._source_badge)
+
+        self._ref_title = QLabel("Source Image")
         self._ref_title.setStyleSheet("color: #8888AA; font-size: 10px; font-weight: 700;")
         self._ref_image = QLabel("Load an image")
         self._ref_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -196,8 +223,35 @@ class Surface3DPanel(QWidget):
     # ── Public API ────────────────────────────────────────────────────────
 
     def set_image(self, image: np.ndarray):
-        self._image = image
+        """Load any image — brightness used as Z height (visual only)."""
+        self._is_real = False
+        self._image   = image
+        self._source_badge.setVisible(False)
+        self._ref_title.setText("Source Image")
         self._update_reference()
+        self._schedule_update()
+
+    def set_height_map(self, height_img: np.ndarray):
+        """
+        Load a Photometric Stereo height map — Z values are real surface geometry.
+        Bright = actually raised.  Dark = actually recessed.
+        """
+        self._is_real = True
+        self._image   = height_img
+        self._source_badge.setText(
+            "⚡  Real Surface Geometry\n"
+            "Photometric Stereo — Frankot-Chellappa\n"
+            "Bright = raised  ·  Dark = recessed"
+        )
+        self._source_badge.setStyleSheet(
+            "background: #001A08; color: #2ECC71; border: 1px solid #1A5A30;"
+            "border-radius: 4px; padding: 6px; font-size: 9px; font-weight: 700;"
+        )
+        self._source_badge.setVisible(True)
+        self._ref_title.setText("Height Map (source)")
+        self._update_reference()
+        # Use a gentler Z scale for PS output — geometry is already proportional
+        self._z_scale.setValue(15)
         self._schedule_update()
 
     def clear(self):
@@ -208,14 +262,12 @@ class Surface3DPanel(QWidget):
     # ── Update logic ─────────────────────────────────────────────────────
 
     def _schedule_update(self):
-        """Restart the debounce timer — fires _start_worker 400ms after last change."""
         self._debounce.start()
 
     def _start_worker(self):
         if self._image is None:
             return
 
-        # Cancel previous worker if still running
         if self._worker and self._worker.isRunning():
             self._worker.quit()
             self._worker.wait()
@@ -228,12 +280,12 @@ class Surface3DPanel(QWidget):
             self._z_scale.value() / 10.0,
             self._colormap.currentText(),
             self._smooth_cb.isChecked(),
+            is_real=self._is_real,
         )
         self._worker.result_ready.connect(self._on_result)
         self._worker.start()
 
     def _on_result(self, z, colors, info: str):
-        """Called from main thread when worker is done — safe to update GL."""
         if z is None:
             self._info.setText(info)
             return
@@ -274,7 +326,8 @@ class Surface3DPanel(QWidget):
         )
         dtype = "16-bit" if self._image.dtype == np.uint16 else "8-bit"
         channels = "Gray" if self._image.ndim == 2 else f"{self._image.shape[2]} ch"
-        self._ref_meta.setText(f"{w} x {h}   {dtype}   {channels}")
+        h2, w2 = img8.shape[:2]
+        self._ref_meta.setText(f"{w2} x {h2}   {dtype}   {channels}")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
