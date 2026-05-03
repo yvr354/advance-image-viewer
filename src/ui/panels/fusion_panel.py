@@ -380,8 +380,7 @@ class FusionPanel(QWidget):
         self._sl.setSpacing(3); self._sl.setContentsMargins(0,0,0,0)
         self._scroll.setWidget(self._sw)
         self._scroll.setMinimumHeight(50)
-        self._scroll.setMaximumHeight(180)
-        root.addWidget(self._scroll)
+        root.addWidget(self._scroll, stretch=1)
 
         self._hint = QLabel(
             "Load images captured under different\n"
@@ -417,8 +416,6 @@ class FusionPanel(QWidget):
         self._status.setStyleSheet(f"color:{_AMBER}; font-size:9px;")
         self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._status)
-
-        root.addStretch(1)
 
     # ── Sub-panels ────────────────────────────────────────────────────────────
 
