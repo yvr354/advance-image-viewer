@@ -274,30 +274,30 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.LeftDockWidgetArea,
         )
 
-        self._dock_inspector.raise_()   # Inspector on top by default
-
+        # ── Focus Assist dock ─────────────────────────────────────────
         _focus_dock_widget = self._build_focus_assist_widget()
         self._dock_focus = self._make_dock(
-            "Focus Assist",
+            "🎯  Focus Assist",
             _focus_dock_widget,
             Qt.DockWidgetArea.RightDockWidgetArea,
         )
-        self.tabifyDockWidget(self._dock_inspector, self._dock_focus)
 
-        # ── Fusion dock (right, tabbed with pipeline) ────────────────
+        # ── Fusion dock ───────────────────────────────────────────────
         self.fusion_panel = FusionPanel()
         self._dock_fusion = self._make_dock(
             "⊕  Illumination Fusion",
             self.fusion_panel,
             Qt.DockWidgetArea.RightDockWidgetArea,
         )
-        self.tabifyDockWidget(self._dock_pipeline, self._dock_fusion)
 
-        self._dock_pipeline.raise_()
+        # ── All 4 right docks in ONE tab group ────────────────────────
+        # No vertical split — full height, no empty space when sections collapse.
+        # Tab order: Inspector | Focus Assist | Filters & Effects | Fusion
+        self.tabifyDockWidget(self._dock_inspector, self._dock_focus)
+        self.tabifyDockWidget(self._dock_inspector, self._dock_pipeline)
+        self.tabifyDockWidget(self._dock_inspector, self._dock_fusion)
 
-        # Bottom docks: allow user to resize freely (min 80px = just the tab strip)
-        for dock in [self._dock_pipeline, self._dock_fusion]:
-            dock.setMinimumHeight(80)
+        self._dock_inspector.raise_()   # Inspector visible by default
 
         # ── Status bar ─────────────────────────────────────────────
         self._build_status_bar()

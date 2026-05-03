@@ -122,8 +122,6 @@ class InspectorPanel(QScrollArea):
         self._build_annotation_group()
         self._build_measure_group()
 
-        self._layout.addStretch()
-
     # ── Mask status banner ─────────────────────────────────────────────────
 
     def _build_mask_status(self):
