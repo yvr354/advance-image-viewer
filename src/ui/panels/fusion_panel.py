@@ -637,19 +637,22 @@ class FusionPanel(QWidget):
         )
         mode = self._current_mode()
         for path in paths:
-            try:
-                data = load_image(path)
-                idx  = self.fusion.add_image(data.raw, path)
-                row  = FusionRow(idx, path, self.fusion)
-                row.set_mode(mode)
-                row.changed.connect(lambda: setattr(self, "_rti_fitted", False))
-                row.remove_requested.connect(self._remove_row)
-                self._rows.append(row)
-                self._sl.addWidget(row)
-                self._hint.setVisible(False)
-                self._rti_fitted = False
-            except Exception as e:
-                self._status.setText(f"Load failed: {e}")
+            self._add_single(path, mode)
+
+    def _add_single(self, path: str, mode: str):
+        try:
+            data = load_image(path)
+            idx  = self.fusion.add_image(data.raw, path)
+            row  = FusionRow(idx, path, self.fusion)
+            row.set_mode(mode)
+            row.changed.connect(lambda: setattr(self, "_rti_fitted", False))
+            row.remove_requested.connect(self._remove_row)
+            self._rows.append(row)
+            self._sl.addWidget(row)
+            self._hint.setVisible(False)
+            self._rti_fitted = False
+        except Exception as e:
+            self._status.setText(f"Load failed: {e}")
 
     def _remove_row(self, row: FusionRow):
         idx = self._rows.index(row)
