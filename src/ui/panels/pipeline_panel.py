@@ -1,21 +1,73 @@
-"""Processing pipeline panel — add, reorder, configure filter layers."""
+"""Processing pipeline panel — expert filter organization with workflow steps and presets."""
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget,
-    QListWidgetItem, QCheckBox, QLabel, QMenu, QScrollArea,
-    QSlider, QComboBox, QSpinBox, QDoubleSpinBox, QGroupBox, QFormLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QLabel,
+    QMenu, QScrollArea, QComboBox, QSpinBox, QDoubleSpinBox, QFrame,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QFont
 
 from src.pipeline.pipeline import Pipeline
-from src.pipeline.filter_registry import FILTER_CATEGORIES
+from src.pipeline.filter_registry import (
+    FILTER_CATEGORIES, WORKFLOW_STEPS, STEP_COLORS, PRESETS,
+)
 from src.filters.base_filter import BaseFilter, FilterParam
 
 
+# ── Styles ───────────────────────────────────────────────────────────────────
+
+_STEP_LABEL_STYLE = {
+    "① Pre-process": "color:#5BA8D8; font-size:9px; font-weight:700; letter-spacing:1px;",
+    "② Enhance":     "color:#D4A84A; font-size:9px; font-weight:700; letter-spacing:1px;",
+    "③ Detect":      "color:#4ABD7A; font-size:9px; font-weight:700; letter-spacing:1px;",
+    "④ Visualize":   "color:#C07AE0; font-size:9px; font-weight:700; letter-spacing:1px;",
+}
+
+_BTN_PRESET = (
+    "QPushButton {"
+    "  background: #141E2A; color: #8899AA;"
+    "  border: 1px solid #1E2E3E; border-radius: 3px;"
+    "  padding: 3px 6px; font-size: 10px; text-align: left;"
+    "}"
+    "QPushButton:hover { background: #1E2E3E; color: #BBCCDD; border-color: #3A5A7A; }"
+    "QPushButton:pressed { background: #0A1620; }"
+)
+
+_BTN_ADD = (
+    "QPushButton {"
+    "  background: #0E2030; color: #00B4D8;"
+    "  border: 1px solid #00B4D8; border-radius: 3px;"
+    "  padding: 4px 12px; font-size: 11px; font-weight: 600;"
+    "}"
+    "QPushButton:hover { background: #0A3040; }"
+)
+
+_BTN_CLEAR = (
+    "QPushButton {"
+    "  background: #200A0A; color: #DD4444;"
+    "  border: 1px solid #552222; border-radius: 3px;"
+    "  padding: 4px 10px; font-size: 11px;"
+    "}"
+    "QPushButton:hover { background: #300A0A; border-color: #884444; }"
+)
+
+_SEP_LINE = "background: #1E2E3E;"
+
+
+def _separator() -> QFrame:
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setFixedHeight(1)
+    line.setStyleSheet(_SEP_LINE)
+    return line
+
+
+# ── Filter layer card ─────────────────────────────────────────────────────────
+
 class FilterLayerWidget(QWidget):
-    changed = pyqtSignal()
-    remove_requested = pyqtSignal(object)
+    changed           = pyqtSignal()
+    remove_requested  = pyqtSignal(object)
     move_up_requested = pyqtSignal(object)
     move_down_requested = pyqtSignal(object)
 
@@ -25,59 +77,113 @@ class FilterLayerWidget(QWidget):
         self._build()
 
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
+        step   = self.filter.CATEGORY
+        color  = STEP_COLORS.get(step, "#334455")
+        desc   = getattr(self.filter, "DESCRIPTION", "")
 
-        # Header row
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 4, 4)
+        layout.setSpacing(3)
+
+        # ── Header ──────────────────────────────────────────────────
         header = QHBoxLayout()
+        header.setSpacing(4)
+
+        # Step badge (tiny colored label — ①②③④)
+        badge = QLabel(step[0])    # just the circled number
+        badge.setFixedSize(14, 14)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setStyleSheet(
+            f"background:{color}; color:#FFFFFF; border-radius:7px;"
+            f"font-size:8px; font-weight:700;"
+        )
+        badge.setToolTip(step)
+        header.addWidget(badge)
+
+        # Filter name checkbox
         self._enable_cb = QCheckBox(self.filter.NAME)
         self._enable_cb.setChecked(self.filter.enabled)
         self._enable_cb.stateChanged.connect(self._on_enable_changed)
+        if desc:
+            self._enable_cb.setToolTip(desc)
+        font = self._enable_cb.font()
+        font.setPointSize(9)
+        font.setBold(True)
+        self._enable_cb.setFont(font)
+        header.addWidget(self._enable_cb, stretch=1)
 
-        btn_up   = QPushButton("▲")
-        btn_down = QPushButton("▼")
-        btn_del  = QPushButton("✕")
-        for btn in [btn_up, btn_down, btn_del]:
-            btn.setFixedSize(20, 20)
-        btn_up.clicked.connect(lambda: self.move_up_requested.emit(self))
-        btn_down.clicked.connect(lambda: self.move_down_requested.emit(self))
+        # Up / Down / Delete buttons
+        for symbol, sig in [("▲", self.move_up_requested),
+                             ("▼", self.move_down_requested)]:
+            b = QPushButton(symbol)
+            b.setFixedSize(18, 18)
+            b.setStyleSheet(
+                "QPushButton { background:#1A2A3A; color:#6688AA; border:none; border-radius:3px; font-size:9px; }"
+                "QPushButton:hover { background:#2A3A4A; color:#AACCEE; }"
+            )
+            b.clicked.connect(lambda _, s=sig: s.emit(self))
+            header.addWidget(b)
+
+        btn_del = QPushButton("✕")
+        btn_del.setFixedSize(18, 18)
+        btn_del.setStyleSheet(
+            "QPushButton { background:#2A1A1A; color:#AA4444; border:none; border-radius:3px; font-size:9px; }"
+            "QPushButton:hover { background:#3A1A1A; color:#FF6666; }"
+        )
+        btn_del.setToolTip("Remove this filter")
         btn_del.clicked.connect(lambda: self.remove_requested.emit(self))
-        btn_del.setStyleSheet("color: #ff5252;")
-
-        header.addWidget(self._enable_cb)
-        header.addStretch()
-        header.addWidget(btn_up)
-        header.addWidget(btn_down)
         header.addWidget(btn_del)
+
         layout.addLayout(header)
 
-        # Params
+        # ── Parameters ──────────────────────────────────────────────
         for name, param in self.filter.params.items():
             row = QHBoxLayout()
-            label = QLabel(param.label)
-            label.setFixedWidth(100)
+            row.setSpacing(6)
+
+            lbl = QLabel(param.label)
+            lbl.setFixedWidth(96)
+            lbl.setStyleSheet("color:#8899AA; font-size:10px;")
             if param.description:
-                label.setToolTip(param.description)
-            row.addWidget(label)
-            widget = self._build_param_widget(name, param)
-            row.addWidget(widget)
+                lbl.setToolTip(param.description)
+            row.addWidget(lbl)
+
+            w = self._build_param_widget(name, param)
+            row.addWidget(w, stretch=1)
             layout.addLayout(row)
 
-        self.setStyleSheet("background: #2a2a2a; border-radius: 4px;")
+        # Card border — colored left side shows which step this filter belongs to
+        self.setStyleSheet(
+            f"FilterLayerWidget {{"
+            f"  background:#1A2030; border-radius:4px;"
+            f"  border-left:3px solid {color};"
+            f"}}"
+        )
 
     def _build_param_widget(self, name: str, param: FilterParam) -> QWidget:
         tip = param.description
+
+        _spin_style = (
+            "QSpinBox, QDoubleSpinBox, QComboBox {"
+            "  background:#0E1820; color:#CCDDEE; border:1px solid #2A3A4A;"
+            "  border-radius:3px; padding:1px 4px; font-size:10px;"
+            "}"
+            "QSpinBox::up-button, QSpinBox::down-button,"
+            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
+            "  width:14px;"
+            "}"
+        )
+
         if param.type == "bool":
             w = QCheckBox()
             w.setChecked(bool(param.value))
             w.stateChanged.connect(lambda v, n=name: self._set_and_emit(n, bool(v)))
         elif param.type == "choice":
             w = QComboBox()
+            w.setStyleSheet(_spin_style)
             for c in param.choices:
                 w.addItem(str(c))
-            current = str(param.value)
-            idx = w.findText(current)
+            idx = w.findText(str(param.value))
             if idx >= 0:
                 w.setCurrentIndex(idx)
             w.currentTextChanged.connect(lambda v, n=name, p=param: self._set_and_emit(
@@ -85,17 +191,20 @@ class FilterLayerWidget(QWidget):
             ))
         elif param.type == "int":
             w = QSpinBox()
+            w.setStyleSheet(_spin_style)
             w.setRange(int(param.min_val or 0), int(param.max_val or 9999))
             w.setSingleStep(int(param.step or 1))
             w.setValue(int(param.value))
             w.valueChanged.connect(lambda v, n=name: self._set_and_emit(n, v))
         else:  # float
             w = QDoubleSpinBox()
+            w.setStyleSheet(_spin_style)
             w.setRange(float(param.min_val or 0), float(param.max_val or 9999))
             w.setSingleStep(float(param.step or 0.1))
             w.setDecimals(2)
             w.setValue(float(param.value))
             w.valueChanged.connect(lambda v, n=name: self._set_and_emit(n, v))
+
         if tip:
             w.setToolTip(tip)
         return w
@@ -109,6 +218,8 @@ class FilterLayerWidget(QWidget):
         self.changed.emit()
 
 
+# ── Pipeline panel ────────────────────────────────────────────────────────────
+
 class PipelinePanel(QWidget):
     pipeline_changed = pyqtSignal()
 
@@ -118,87 +229,146 @@ class PipelinePanel(QWidget):
         self._layer_widgets: list[FilterLayerWidget] = []
         self._build()
 
+    # ── Construction ─────────────────────────────────────────────────────────
+
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(0)
 
-        # Toolbar
+        # ── Presets section ──────────────────────────────────────────
+        presets_header = QLabel("  ⚡  Expert Presets")
+        presets_header.setStyleSheet(
+            "background:#0A1420; color:#668899; font-size:10px; font-weight:700;"
+            "padding:4px 0px; letter-spacing:1px;"
+        )
+        presets_header.setToolTip(
+            "One-click starting points for common inspection tasks.\n"
+            "Each preset adds a proven combination of filters in the correct order.\n"
+            "Hover each button to see which filters are added and why."
+        )
+        root.addWidget(presets_header)
+
+        # Two rows of 3 preset buttons
+        preset_names = list(PRESETS.keys())
+        for row_idx in range(0, len(preset_names), 3):
+            row = QHBoxLayout()
+            row.setContentsMargins(2, 2, 2, 2)
+            row.setSpacing(3)
+            for name in preset_names[row_idx:row_idx + 3]:
+                info = PRESETS[name]
+                btn = QPushButton(f"{info['icon']}  {name}")
+                btn.setStyleSheet(_BTN_PRESET)
+                btn.setToolTip(info["tip"])
+                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                btn.clicked.connect(lambda _, n=name: self._apply_preset(n))
+                row.addWidget(btn)
+            root.addLayout(row)
+
+        root.addWidget(_separator())
+        root.addSpacing(4)
+
+        # ── Toolbar: Add Filter + Clear All ──────────────────────────
         toolbar = QHBoxLayout()
-        btn_add = QPushButton("+ Add Filter")
+        toolbar.setContentsMargins(2, 0, 2, 0)
+        toolbar.setSpacing(6)
+
+        btn_add = QPushButton("＋  Add Filter")
+        btn_add.setStyleSheet(_BTN_ADD)
+        btn_add.setToolTip(
+            "Browse all 28 filters organized by workflow step.\n"
+            "① Pre-process → ② Enhance → ③ Detect → ④ Visualize"
+        )
         btn_add.clicked.connect(self._show_add_menu)
-        btn_add.setToolTip("Add a processing filter to the pipeline")
+
         btn_clear = QPushButton("Clear All")
+        btn_clear.setStyleSheet(_BTN_CLEAR)
+        btn_clear.setToolTip("Remove all filters from the pipeline")
         btn_clear.clicked.connect(self._clear_all)
-        btn_clear.setStyleSheet("color: #ff5252;")
-        toolbar.addWidget(btn_add)
-        toolbar.addWidget(btn_clear)
-        toolbar.addStretch()
 
-        # Quick-add buttons for most-used filters
-        for label, filter_name in [
-            ("Sharpen", "Unsharp Mask"),
-            ("Denoise", "Bilateral Filter"),
-            ("Contrast", "CLAHE"),
-            ("Brightness", "Brightness / Contrast"),
-            ("Edge Detect", "Canny Edge"),
-        ]:
-            btn = QPushButton(label)
-            btn.setStyleSheet(
-                "QPushButton { background:#1a2a3a; color:#00B4D8; "
-                "border:1px solid #00B4D8; border-radius:3px; padding:2px 6px; font-size:10px;}"
-                "QPushButton:hover { background:#003344; }"
-            )
-            btn.setToolTip(f"Quick-add {label} filter")
-            btn.clicked.connect(lambda _, n=filter_name: self._quick_add(n))
-            toolbar.addWidget(btn)
+        toolbar.addWidget(btn_add, stretch=2)
+        toolbar.addWidget(btn_clear, stretch=1)
+        root.addLayout(toolbar)
 
-        layout.addLayout(toolbar)
+        root.addSpacing(4)
+        root.addWidget(_separator())
+        root.addSpacing(4)
 
-        # Empty-state hint shown when no filters are active
+        # ── Empty state hint ─────────────────────────────────────────
         self._empty_label = QLabel(
-            "No filters active.\n"
-            "Click  + Add Filter  or use the quick buttons above to start processing."
+            "No filters active.\n\n"
+            "① Start with a Preset above for quick results,\n"
+            "   or click  ＋ Add Filter  to build your own pipeline.\n\n"
+            "Filters apply top → bottom. Drag ▲▼ to reorder."
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setStyleSheet(
-            "color: #444455; font-size: 11px; padding: 20px;"
+            "color:#334455; font-size:10px; padding:16px 8px; line-height:160%;"
         )
-        layout.addWidget(self._empty_label)
+        root.addWidget(self._empty_label)
 
-        # Scrollable layer list
+        # ── Scrollable pipeline list ─────────────────────────────────
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self._scroll_widget = QWidget()
+        self._scroll_widget.setStyleSheet("background: transparent;")
         self._scroll_layout = QVBoxLayout(self._scroll_widget)
         self._scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._scroll_layout.setSpacing(4)
+        self._scroll_layout.setSpacing(6)
+        self._scroll_layout.setContentsMargins(0, 0, 0, 0)
         self._scroll.setWidget(self._scroll_widget)
-        self._scroll.setVisible(False)   # hidden until first filter added
-        layout.addWidget(self._scroll)
+        self._scroll.setVisible(False)
+        root.addWidget(self._scroll, stretch=1)
 
-    def _update_empty_state(self):
-        has_filters = len(self._layer_widgets) > 0
-        self._empty_label.setVisible(not has_filters)
-        self._scroll.setVisible(has_filters)
+    # ── Add Filter menu ───────────────────────────────────────────────────────
+
+    def _show_add_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background:#0E1820; color:#AABBCC; border:1px solid #2A3A4A; }"
+            "QMenu::item { padding:5px 20px 5px 10px; }"
+            "QMenu::item:selected { background:#1E3A50; color:#FFFFFF; }"
+            "QMenu::separator { height:1px; background:#1E2E3E; margin:3px 0px; }"
+        )
+        for step_name, step_desc in WORKFLOW_STEPS:
+            filters = FILTER_CATEGORIES.get(step_name, [])
+            if not filters:
+                continue
+
+            sub = menu.addMenu(step_name)
+            sub.setStyleSheet(menu.styleSheet())
+
+            # Step description at top of submenu (disabled, informational)
+            info_action = sub.addAction(f"  {step_desc}")
+            info_action.setEnabled(False)
+            sub.addSeparator()
+
+            for cls in filters:
+                action = sub.addAction(cls.NAME)
+                desc = getattr(cls, "DESCRIPTION", "")
+                if desc:
+                    action.setToolTip(desc)
+                action.setStatusTip(desc)
+                action.triggered.connect(lambda checked, c=cls: self._add_filter(c()))
+
+        menu.exec(self.mapToGlobal(self.rect().topLeft()))
+
+    # ── Preset application ────────────────────────────────────────────────────
+
+    def _apply_preset(self, preset_name: str):
+        info = PRESETS[preset_name]
+        for fname in info["filters"]:
+            self._quick_add(fname)
 
     def _quick_add(self, filter_name: str):
-        """Add a filter by name — used by quick-add toolbar buttons."""
-        from src.pipeline.filter_registry import FILTER_CATEGORIES
         for filters in FILTER_CATEGORIES.values():
             for cls in filters:
                 if cls.NAME == filter_name:
                     self._add_filter(cls())
                     return
 
-    def _show_add_menu(self):
-        menu = QMenu(self)
-        for category, filters in FILTER_CATEGORIES.items():
-            sub = menu.addMenu(category)
-            for cls in filters:
-                action = sub.addAction(cls.NAME)
-                action.triggered.connect(lambda checked, c=cls: self._add_filter(c()))
-        menu.exec(self.mapToGlobal(self.rect().topLeft()))
+    # ── Pipeline management ───────────────────────────────────────────────────
 
     def _add_filter(self, filter_instance: BaseFilter):
         self.pipeline.add(filter_instance)
@@ -257,8 +427,13 @@ class PipelinePanel(QWidget):
         self._update_empty_state()
         self.pipeline_changed.emit()
 
+    def _update_empty_state(self):
+        has = len(self._layer_widgets) > 0
+        self._empty_label.setVisible(not has)
+        self._scroll.setVisible(has)
+
     def refresh(self):
-        """Rebuild UI from current pipeline state (after load)."""
+        """Rebuild UI from current pipeline state (e.g. after load from file)."""
         for w in self._layer_widgets:
             self._scroll_layout.removeWidget(w)
             w.deleteLater()

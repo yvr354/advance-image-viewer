@@ -7,7 +7,8 @@ from src.filters.base_filter import BaseFilter, FilterParam
 
 class UnsharpMaskFilter(BaseFilter):
     NAME = "Unsharp Mask"
-    CATEGORY = "Sharpening & Edge"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Industry-standard sharpening. Adds a scaled high-pass layer to the image. Makes edge features crisper without changing overall brightness."
 
     def _define_params(self):
         self.params["radius"]    = FilterParam("radius",    "Radius",    "float", 1.0, 0.5, 10.0, 0.5,
@@ -40,7 +41,8 @@ class UnsharpMaskFilter(BaseFilter):
 
 class CannyEdgeFilter(BaseFilter):
     NAME = "Canny Edge"
-    CATEGORY = "Sharpening & Edge"
+    CATEGORY = "③ Detect"
+    DESCRIPTION = "Optimal edge detector (Canny 1986). Finds thin, precise, connected edges using gradient magnitude + hysteresis. Best for scratch boundaries and part outlines."
 
     def _define_params(self):
         self.params["threshold1"] = FilterParam("threshold1", "Low Threshold",  "int", 50,  0, 500, 5,
@@ -69,7 +71,8 @@ class CannyEdgeFilter(BaseFilter):
 
 class SobelEdgeFilter(BaseFilter):
     NAME = "Sobel Edge"
-    CATEGORY = "Sharpening & Edge"
+    CATEGORY = "③ Detect"
+    DESCRIPTION = "Directional gradient edge map. Faster than Canny, good for coarse edge extraction or direction-specific defect analysis (X only, Y only, or combined)."
 
     def _define_params(self):
         self.params["direction"] = FilterParam("direction", "Direction", "choice", "combined", choices=["x", "y", "combined"],
@@ -103,7 +106,8 @@ class SobelEdgeFilter(BaseFilter):
 
 class LaplacianSharpenFilter(BaseFilter):
     NAME = "Laplacian Sharpen"
-    CATEGORY = "Sharpening & Edge"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Second-derivative sharpening. More aggressive than Unsharp Mask. Excellent for revealing micro-cracks, fine pits, and surface discontinuities."
 
     def _define_params(self):
         self.params["strength"] = FilterParam("strength", "Strength", "float", 1.0, 0.1, 5.0, 0.1,
@@ -128,7 +132,8 @@ class LaplacianSharpenFilter(BaseFilter):
 
 class DoGFilter(BaseFilter):
     NAME = "Difference of Gaussians"
-    CATEGORY = "Sharpening & Edge"
+    CATEGORY = "③ Detect"
+    DESCRIPTION = "Band-pass spatial filter — isolates features at one specific size scale. Targets defects of a chosen size while suppressing everything else."
 
     def _define_params(self):
         self.params["sigma1"] = FilterParam("sigma1", "Sigma 1 (fine)",   "float", 1.0, 0.5, 10.0, 0.5,
@@ -158,7 +163,8 @@ class DoGFilter(BaseFilter):
 
 class MorphGradientFilter(BaseFilter):
     NAME = "Morphological Gradient"
-    CATEGORY = "Sharpening & Edge"
+    CATEGORY = "③ Detect"
+    DESCRIPTION = "Boundary extractor (dilation minus erosion). Produces thick connected edge outlines. Use when edges must form closed regions for area measurement."
 
     def _define_params(self):
         self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 3, 3, 21, 2,

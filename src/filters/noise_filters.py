@@ -7,7 +7,8 @@ from src.filters.base_filter import BaseFilter, FilterParam
 
 class GaussianBlurFilter(BaseFilter):
     NAME = "Gaussian Blur"
-    CATEGORY = "Smoothing & Noise"
+    CATEGORY = "① Pre-process"
+    DESCRIPTION = "Standard smoothing. Apply first to suppress camera noise before edge detection. Fast. Use sigma=1.0 as the default pre-processing step."
 
     def _define_params(self):
         self.params["sigma"] = FilterParam("sigma", "Sigma", "float", 1.0, 0.5, 20.0, 0.5,
@@ -25,7 +26,8 @@ class GaussianBlurFilter(BaseFilter):
 
 class MedianFilter(BaseFilter):
     NAME = "Median Filter"
-    CATEGORY = "Smoothing & Noise"
+    CATEGORY = "① Pre-process"
+    DESCRIPTION = "Removes isolated hot pixels, dust, and salt-and-pepper noise while preserving edges. Use before thresholding when the camera has stuck pixels."
 
     def _define_params(self):
         self.params["ksize"] = FilterParam("ksize", "Kernel Size", "choice", 3, choices=[3, 5, 7, 9, 11, 15, 21],
@@ -41,7 +43,8 @@ class MedianFilter(BaseFilter):
 
 class BilateralFilter(BaseFilter):
     NAME = "Bilateral Filter"
-    CATEGORY = "Smoothing & Noise"
+    CATEGORY = "① Pre-process"
+    DESCRIPTION = "Edge-preserving smoother. Removes noise from flat areas while keeping edges sharp. Best pre-processor for most industrial inspection workflows."
 
     def _define_params(self):
         self.params["diameter"]    = FilterParam("diameter",    "Diameter",     "int",   9,   3, 25, 2,
@@ -67,7 +70,8 @@ class BilateralFilter(BaseFilter):
 
 class NLMeansFilter(BaseFilter):
     NAME = "NL-Means Denoise"
-    CATEGORY = "Smoothing & Noise"
+    CATEGORY = "① Pre-process"
+    DESCRIPTION = "Highest quality denoiser — finds similar patches across the whole image to average out noise. Preserves fine texture better than Bilateral. Slower."
 
     def _define_params(self):
         self.params["h"]          = FilterParam("h",          "H Strength",      "float", 10.0, 1.0, 50.0, 1.0,
@@ -96,7 +100,8 @@ class NLMeansFilter(BaseFilter):
 
 class TopHatFilter(BaseFilter):
     NAME = "Top-Hat"
-    CATEGORY = "Morphological"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Reveals bright features smaller than the kernel on a dark background. Use for bright specks, protrusions, or raised defects on machined surfaces."
 
     def _define_params(self):
         self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 15, 3, 51, 2,
@@ -123,7 +128,8 @@ class TopHatFilter(BaseFilter):
 
 class BlackHatFilter(BaseFilter):
     NAME = "Black-Hat"
-    CATEGORY = "Morphological"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Reveals dark features smaller than the kernel on a bright background. Use for pits, voids, holes, and scratches on reflective surfaces."
 
     def _define_params(self):
         self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 15, 3, 51, 2,
@@ -150,7 +156,8 @@ class BlackHatFilter(BaseFilter):
 
 class MorphOpenFilter(BaseFilter):
     NAME = "Morphological Open"
-    CATEGORY = "Morphological"
+    CATEGORY = "③ Detect"
+    DESCRIPTION = "Erosion then dilation. Removes small bright noise spots after thresholding. Use to eliminate false positives before blob counting."
 
     def _define_params(self):
         self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 5, 3, 31, 2,
@@ -168,7 +175,8 @@ class MorphOpenFilter(BaseFilter):
 
 class MorphCloseFilter(BaseFilter):
     NAME = "Morphological Close"
-    CATEGORY = "Morphological"
+    CATEGORY = "③ Detect"
+    DESCRIPTION = "Dilation then erosion. Fills small gaps inside detected regions. Use after thresholding to join fragmented defect blobs for correct area measurement."
 
     def _define_params(self):
         self.params["ksize"] = FilterParam("ksize", "Kernel Size", "int", 5, 3, 31, 2,

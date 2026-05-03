@@ -21,7 +21,8 @@ class FilterParam:
 
 class BaseFilter(ABC):
     NAME = "Base Filter"
-    CATEGORY = "General"
+    CATEGORY = "① Pre-process"
+    DESCRIPTION = ""   # one-line: what this filter does and when to use it
 
     def __init__(self):
         self.enabled = True

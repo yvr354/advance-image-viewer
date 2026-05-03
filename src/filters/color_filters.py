@@ -20,7 +20,8 @@ LUT_MAP = {
 
 class FalseColorFilter(BaseFilter):
     NAME = "False Color (LUT)"
-    CATEGORY = "False Color & LUT"
+    CATEGORY = "④ Visualize"
+    DESCRIPTION = "Maps grayscale intensity to a scientific color scale. HOT = standard defect heat map. VIRIDIS = perceptually uniform, best for reports and publications."
 
     def _define_params(self):
         self.params["lut"]       = FilterParam("lut",       "Color Map", "choice", "JET", choices=list(LUT_MAP.keys()),
@@ -51,7 +52,8 @@ class FalseColorFilter(BaseFilter):
 
 class ClippingHighlightFilter(BaseFilter):
     NAME = "Clipping Highlight"
-    CATEGORY = "False Color & LUT"
+    CATEGORY = "④ Visualize"
+    DESCRIPTION = "Flags overexposed pixels RED and underexposed pixels BLUE. Use to verify camera exposure. Clipped pixels have no information — defects cannot be detected there."
 
     def _define_params(self):
         self.params["over_threshold"]  = FilterParam("over_threshold",  "Overexpose Threshold",  "int", 250, 200, 255, 1,
@@ -80,7 +82,8 @@ class ClippingHighlightFilter(BaseFilter):
 
 class ChannelSplitFilter(BaseFilter):
     NAME = "Channel Split"
-    CATEGORY = "False Color & LUT"
+    CATEGORY = "④ Visualize"
+    DESCRIPTION = "Isolates a single color channel. Green channel has the highest SNR on Bayer cameras. Select the channel with best defect contrast."
 
     def _define_params(self):
         self.params["channel"] = FilterParam("channel", "Channel", "choice", "gray", choices=["red", "green", "blue", "gray"],
@@ -109,7 +112,8 @@ class ChannelSplitFilter(BaseFilter):
 
 class ChannelMixerFilter(BaseFilter):
     NAME = "Channel Mixer"
-    CATEGORY = "False Color & LUT"
+    CATEGORY = "④ Visualize"
+    DESCRIPTION = "Custom weighted combination of RGB channels. Emphasizes a specific spectral signature — e.g. make red-tinted defects appear bright in a custom output channel."
 
     def _define_params(self):
         self.params["rr"] = FilterParam("rr", "R→R", "float", 1.0, 0.0, 2.0, 0.05,

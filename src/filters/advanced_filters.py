@@ -26,8 +26,9 @@ class GaborBankFilter(BaseFilter):
     Superior to Sobel/Canny for periodic and directional surface defects.
     — Daugman (1985), revalidated in JIM 2025 for industrial surfaces.
     """
-    NAME     = "Gabor Filter Bank"
-    CATEGORY = "Texture Analysis"
+    NAME        = "Gabor Filter Bank"
+    CATEGORY    = "③ Detect"
+    DESCRIPTION = "Multi-orientation texture analyzer. Best filter for directional surface defects: machining marks, weave, scratches at any angle. Detects all orientations simultaneously."
 
     def _define_params(self):
         self.params["frequency"]    = FilterParam("frequency",    "Frequency",      "float", 0.15, 0.02, 0.50, 0.01,
@@ -120,8 +121,9 @@ class WaveletFilter(BaseFilter):
     Combined with FFT for noise elimination before spectral analysis.
     — ACM Proceedings 2025: cigarette foil defect detection.
     """
-    NAME     = "Wavelet Decomposition"
-    CATEGORY = "Texture Analysis"
+    NAME        = "Wavelet Decomposition"
+    CATEGORY    = "③ Detect"
+    DESCRIPTION = "Multi-scale frequency decomposition. Each level reveals defects at a specific spatial scale. Use detail_all mode for broadest defect sensitivity."
 
     def _define_params(self):
         self.params["level"]   = FilterParam("level",   "Level",      "int",    2,   1, 5,  1,
@@ -227,8 +229,9 @@ class FFTMagnitudeFilter(BaseFilter):
     Periodic defects appear as bright spots away from center.
     Removes periodic noise (banding) via notch filtering.
     """
-    NAME     = "FFT Analysis"
-    CATEGORY = "Texture Analysis"
+    NAME        = "FFT Analysis"
+    CATEGORY    = "③ Detect"
+    DESCRIPTION = "Fourier frequency analysis. Magnitude mode reveals periodic defects as bright spots. Highpass mode sharpens fine detail. Removes banding and moire interference."
 
     def _define_params(self):
         self.params["mode"]       = FilterParam("mode",       "Display Mode", "choice", "magnitude",
@@ -310,8 +313,9 @@ class LBPTextureFilter(BaseFilter):
     Defective regions break the regular texture pattern.
     Illumination-invariant (does not change with brightness shifts).
     """
-    NAME     = "LBP Texture"
-    CATEGORY = "Texture Analysis"
+    NAME        = "LBP Texture"
+    CATEGORY    = "③ Detect"
+    DESCRIPTION = "Local Binary Pattern texture encoder. Illumination-invariant — brightness changes do not affect the result. Segments regions with different surface texture."
 
     def _define_params(self):
         self.params["radius"]  = FilterParam("radius",  "Radius",  "int", 3, 1, 10, 1,

@@ -7,7 +7,8 @@ from src.filters.base_filter import BaseFilter, FilterParam
 
 class BrightnessContrastFilter(BaseFilter):
     NAME = "Brightness / Contrast"
-    CATEGORY = "Contrast & Tone"
+    CATEGORY = "① Pre-process"
+    DESCRIPTION = "Linear brightness shift and contrast scaling. Fast correction for exposure errors before analysis."
 
     def _define_params(self):
         self.params["brightness"] = FilterParam("brightness", "Brightness", "int", 0, -255, 255, 1,
@@ -29,7 +30,8 @@ class BrightnessContrastFilter(BaseFilter):
 
 class GammaFilter(BaseFilter):
     NAME = "Gamma Correction"
-    CATEGORY = "Contrast & Tone"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Non-linear brightness curve. Lifts shadows (<1.0) without blowing highlights. Use before edge detection to bring out detail in dark regions."
 
     def _define_params(self):
         self.params["gamma"] = FilterParam("gamma", "Gamma", "float", 1.0, 0.1, 5.0, 0.05,
@@ -47,7 +49,8 @@ class GammaFilter(BaseFilter):
 
 class CLAHEFilter(BaseFilter):
     NAME = "CLAHE"
-    CATEGORY = "Contrast & Tone"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Adaptive local contrast enhancement. Industry standard for revealing low-contrast defects. Preferred over global equalization in machine vision inspection."
 
     def _define_params(self):
         self.params["clip_limit"] = FilterParam("clip_limit", "Clip Limit", "float", 2.0, 0.5, 10.0, 0.5,
@@ -75,7 +78,8 @@ class CLAHEFilter(BaseFilter):
 
 class HistogramEqualizationFilter(BaseFilter):
     NAME = "Histogram Equalization"
-    CATEGORY = "Contrast & Tone"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Global contrast stretch using cumulative histogram. Fast but may over-enhance noise. Use CLAHE instead for precision inspection."
 
     def _define_params(self):
         pass
@@ -91,7 +95,8 @@ class HistogramEqualizationFilter(BaseFilter):
 
 class LevelsFilter(BaseFilter):
     NAME = "Levels"
-    CATEGORY = "Contrast & Tone"
+    CATEGORY = "② Enhance"
+    DESCRIPTION = "Full tonal range control: input clipping, gamma midpoint, output clipping. Professional-grade exposure correction same as Photoshop Levels."
 
     def _define_params(self):
         self.params["in_black"] = FilterParam("in_black", "Input Black", "int", 0, 0, 254, 1,
@@ -127,7 +132,8 @@ class LevelsFilter(BaseFilter):
 
 class NormalizeFilter(BaseFilter):
     NAME = "Normalize"
-    CATEGORY = "Contrast & Tone"
+    CATEGORY = "① Pre-process"
+    DESCRIPTION = "Stretches image to full 0–255 range. Essential when raw pixels are in a narrow range (e.g. 16-bit camera at low gain)."
 
     def _define_params(self):
         pass
@@ -142,7 +148,8 @@ class NormalizeFilter(BaseFilter):
 
 class InvertFilter(BaseFilter):
     NAME = "Invert"
-    CATEGORY = "Contrast & Tone"
+    CATEGORY = "④ Visualize"
+    DESCRIPTION = "Flips pixel values (max − x). Use when defects are dark on a bright background — invert so defects become bright before Top-Hat or thresholding."
 
     def _define_params(self):
         pass
