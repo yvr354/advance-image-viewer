@@ -107,21 +107,21 @@ class FusionRow(QWidget):
 
     def _build(self, path: str):
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(4, 2, 4, 2)
-        lay.setSpacing(4)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(6)
 
-        # Filename
+        # Filename — stretch to take available space
         name = QLabel(os.path.basename(path))
-        name.setFixedWidth(110)
-        name.setStyleSheet(f"color:{_TEXT}; font-size:10px;")
+        name.setMinimumWidth(80)
+        name.setStyleSheet(f"color:{_TEXT}; font-size:11px; font-weight:600;")
         name.setToolTip(path)
-        lay.addWidget(name)
+        lay.addWidget(name, stretch=1)
 
         # ── RGB controls ─────────────────────────────────────────────────
         self._rgb_w = QWidget()
         rgb_lay = QHBoxLayout(self._rgb_w)
         rgb_lay.setContentsMargins(0, 0, 0, 0)
-        rgb_lay.setSpacing(3)
+        rgb_lay.setSpacing(6)
 
         from PyQt6.QtWidgets import QCheckBox
         self._cb_r = QCheckBox("R"); self._cb_g = QCheckBox("G"); self._cb_b = QCheckBox("B")
@@ -130,15 +130,16 @@ class FusionRow(QWidget):
             (self._cb_g, "#55EE55", "Assign this image to the Green channel of the composite."),
             (self._cb_b, "#5599FF", "Assign this image to the Blue channel of the composite."),
         ]:
-            cb.setStyleSheet(f"color:{col}; font-size:10px; font-weight:700;")
+            cb.setStyleSheet(f"color:{col}; font-size:11px; font-weight:700;")
             cb.setToolTip(tip)
             cb.stateChanged.connect(self._on_rgb)
             rgb_lay.addWidget(cb)
 
         self._w_spin = QDoubleSpinBox()
         self._w_spin.setRange(0.0, 2.0); self._w_spin.setSingleStep(0.1)
-        self._w_spin.setValue(1.0); self._w_spin.setFixedWidth(54)
-        self._w_spin.setStyleSheet(_SPIN); self._w_spin.setPrefix("w:")
+        self._w_spin.setValue(1.0); self._w_spin.setFixedWidth(72)
+        self._w_spin.setStyleSheet(_SPIN); self._w_spin.setPrefix("w: ")
+        self._w_spin.setDecimals(2)
         self._w_spin.setToolTip(
             "Channel weight (0–2).\n"
             "1.0 = normal contribution.\n"
@@ -152,16 +153,16 @@ class FusionRow(QWidget):
         self._ang_w = QWidget()
         ang_lay = QHBoxLayout(self._ang_w)
         ang_lay.setContentsMargins(0, 0, 0, 0)
-        ang_lay.setSpacing(3)
+        ang_lay.setSpacing(4)
 
         for txt in ["Az:", "El:"]:
             lbl = QLabel(txt)
-            lbl.setStyleSheet(f"color:{_DIM}; font-size:10px;")
+            lbl.setStyleSheet(f"color:{_DIM}; font-size:11px;")
             ang_lay.addWidget(lbl)
             sp  = QDoubleSpinBox()
             sp.setRange(0, 360 if txt == "Az:" else 90)
             sp.setSingleStep(5); sp.setValue(0 if txt == "Az:" else 45)
-            sp.setFixedWidth(58); sp.setStyleSheet(_SPIN); sp.setSuffix("°")
+            sp.setFixedWidth(68); sp.setStyleSheet(_SPIN); sp.setSuffix("°")
             if txt == "Az:":
                 sp.setToolTip(
                     "Azimuth — horizontal angle of the light source (0–360°).\n"
@@ -183,21 +184,19 @@ class FusionRow(QWidget):
         self._ang_w.setVisible(False)
         lay.addWidget(self._ang_w)
 
-        lay.addStretch(1)
-
         # Delete
         del_btn = QPushButton("✕")
-        del_btn.setFixedSize(18, 18)
+        del_btn.setFixedSize(22, 22)
         del_btn.setToolTip("Remove this image from the fusion set.")
         del_btn.setStyleSheet(
-            "QPushButton{background:#1A0808;color:#AA4444;border:none;border-radius:3px;font-size:9px;}"
+            "QPushButton{background:#1A0808;color:#AA4444;border:none;border-radius:3px;font-size:10px;}"
             "QPushButton:hover{background:#2A1010;color:#FF6666;}"
         )
         del_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         lay.addWidget(del_btn)
 
-        self.setStyleSheet("background:#111A24; border-radius:3px;")
-        self.setFixedHeight(26)
+        self.setStyleSheet("background:#111A24; border-radius:4px;")
+        self.setFixedHeight(34)
 
     def set_mode(self, mode: str):
         angle_modes = ("Photometric Stereo", "RTI Relight")
@@ -367,8 +366,8 @@ class FusionPanel(QWidget):
         root.addLayout(img_bar)
 
         # Column header
-        self._col_hdr = QLabel("Filename        R  G  B  Weight")
-        self._col_hdr.setStyleSheet(f"color:{_DIM}; font-size:9px; padding-left:4px;")
+        self._col_hdr = QLabel("Filename                     R    G    B    Weight")
+        self._col_hdr.setStyleSheet(f"color:{_DIM}; font-size:9px; padding-left:6px;")
         root.addWidget(self._col_hdr)
 
         self._scroll = QScrollArea()
