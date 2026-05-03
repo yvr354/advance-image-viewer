@@ -238,9 +238,10 @@ class PipelinePanel(QWidget):
 
         # ── Presets section ──────────────────────────────────────────
         presets_header = QLabel("  ⚡  Expert Presets")
+        presets_header.setFixedHeight(22)
         presets_header.setStyleSheet(
             "background:#0A1420; color:#668899; font-size:10px; font-weight:700;"
-            "padding:4px 0px; letter-spacing:1px;"
+            "padding:2px 0px; letter-spacing:1px;"
         )
         presets_header.setToolTip(
             "One-click starting points for common inspection tasks.\n"
@@ -297,13 +298,15 @@ class PipelinePanel(QWidget):
         # ── Empty state hint ─────────────────────────────────────────
         self._empty_label = QLabel(
             "No filters active.\n\n"
-            "① Start with a Preset above for quick results,\n"
-            "   or click  ＋ Add Filter  to build your own pipeline.\n\n"
-            "Filters apply top → bottom. Drag ▲▼ to reorder."
+            "Use a Preset above, or click  ＋ Add Filter.\n\n"
+            "Filters apply top → bottom."
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setStyleSheet(
-            "color:#334455; font-size:10px; padding:16px 8px; line-height:160%;"
+            "color:#334455; font-size:10px; padding:12px 8px;"
+        )
+        self._empty_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         root.addWidget(self._empty_label)
 
@@ -320,6 +323,9 @@ class PipelinePanel(QWidget):
         self._scroll.setWidget(self._scroll_widget)
         self._scroll.setVisible(False)
         root.addWidget(self._scroll, stretch=1)
+
+        # Absorb extra vertical space at the bottom, not inside the labels
+        root.addStretch(1)
 
     # ── Add Filter menu ───────────────────────────────────────────────────────
 
