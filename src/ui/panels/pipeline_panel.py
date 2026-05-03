@@ -330,20 +330,25 @@ class PipelinePanel(QWidget):
     # ── Add Filter menu ───────────────────────────────────────────────────────
 
     def _show_add_menu(self):
-        menu = QMenu(self)
-        menu.setStyleSheet(
+        _menu_style = (
             "QMenu { background:#0E1820; color:#AABBCC; border:1px solid #2A3A4A; }"
             "QMenu::item { padding:5px 20px 5px 10px; }"
             "QMenu::item:selected { background:#1E3A50; color:#FFFFFF; }"
+            "QMenu::item:disabled { color:#445566; }"
             "QMenu::separator { height:1px; background:#1E2E3E; margin:3px 0px; }"
         )
+        menu = QMenu(self)
+        menu.setStyleSheet(_menu_style)
+        menu.setToolTipsVisible(True)
+
         for step_name, step_desc in WORKFLOW_STEPS:
             filters = FILTER_CATEGORIES.get(step_name, [])
             if not filters:
                 continue
 
             sub = menu.addMenu(step_name)
-            sub.setStyleSheet(menu.styleSheet())
+            sub.setStyleSheet(_menu_style)
+            sub.setToolTipsVisible(True)   # ← enables hover tooltips on actions
 
             # Step description at top of submenu (disabled, informational)
             info_action = sub.addAction(f"  {step_desc}")
@@ -354,7 +359,7 @@ class PipelinePanel(QWidget):
                 action = sub.addAction(cls.NAME)
                 desc = getattr(cls, "DESCRIPTION", "")
                 if desc:
-                    action.setToolTip(desc)
+                    action.setToolTip(desc)   # shown on hover (requires setToolTipsVisible)
                 action.setStatusTip(desc)
                 action.triggered.connect(lambda checked, c=cls: self._add_filter(c()))
 
