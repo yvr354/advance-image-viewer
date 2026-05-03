@@ -12,6 +12,67 @@ from PyQt6.QtGui import QColor, QFont
 import pyqtgraph as pg
 
 
+# ── Collapsible section widget ────────────────────────────────────────────────
+
+class CollapsibleSection(QWidget):
+    """A titled section with a click-to-collapse/expand header."""
+
+    def __init__(self, title: str, expanded: bool = True, parent=None):
+        super().__init__(parent)
+        self._title    = title
+        self._expanded = expanded
+        self._build()
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 2, 0, 2)
+        outer.setSpacing(0)
+
+        # ── Header ────────────────────────────────────────────────────
+        self._header = QPushButton()
+        self._header.setCheckable(True)
+        self._header.setChecked(self._expanded)
+        self._header.setStyleSheet(
+            "QPushButton {"
+            "  background:#141E2A; color:#8899AA;"
+            "  border:none; border-top:1px solid #1E2E3E;"
+            "  text-align:left; padding:4px 6px;"
+            "  font-size:10px; font-weight:700; letter-spacing:0.5px;"
+            "}"
+            "QPushButton:hover { background:#1A2838; color:#BBCCDD; }"
+            "QPushButton:checked { color:#AACCEE; }"
+        )
+        self._header.clicked.connect(self._toggle)
+        outer.addWidget(self._header)
+
+        # ── Body ──────────────────────────────────────────────────────
+        self.body = QWidget()
+        self.body.setStyleSheet("background: transparent;")
+        self._body_layout = QVBoxLayout(self.body)
+        self._body_layout.setContentsMargins(4, 4, 4, 6)
+        self._body_layout.setSpacing(3)
+        self.body.setVisible(self._expanded)
+        outer.addWidget(self.body)
+
+        self._refresh_header()
+
+    def _refresh_header(self):
+        arrow = "▼" if self._expanded else "▶"
+        self._header.setText(f"  {arrow}   {self._title}")
+
+    def _toggle(self):
+        self._expanded = not self._expanded
+        self.body.setVisible(self._expanded)
+        self._refresh_header()
+
+    # Convenience — add widgets/layouts directly into the body
+    def addWidget(self, w: QWidget):
+        self._body_layout.addWidget(w)
+
+    def addLayout(self, lay):
+        self._body_layout.addLayout(lay)
+
+
 class MetricRow(QWidget):
     def __init__(self, label: str, parent=None):
         super().__init__(parent)
@@ -106,11 +167,8 @@ class InspectorPanel(QScrollArea):
     # ── Focus ──────────────────────────────────────────────────────────────
 
     def _build_focus_group(self):
-        box = QGroupBox("Focus & Sharpness")
-        layout = QVBoxLayout(box)
-        layout.setSpacing(3)
+        box = CollapsibleSection("Focus & Sharpness", expanded=True)
 
-        # Verdict + confidence on same line
         top_row = QHBoxLayout()
         self._focus_verdict = QLabel("—")
         self._focus_verdict.setFont(QFont("Arial", 12, QFont.Weight.Bold))
@@ -120,22 +178,20 @@ class InspectorPanel(QScrollArea):
         top_row.addWidget(self._focus_verdict)
         top_row.addStretch()
         top_row.addWidget(self._focus_confidence)
-        layout.addLayout(top_row)
+        box.addLayout(top_row)
 
         self._focus_score_row = MetricRow("Score")
-        layout.addWidget(self._focus_score_row)
+        box.addWidget(self._focus_score_row)
 
-        # Raw metrics — always shown so expert can verify
         self._focus_raw_lbl = QLabel("Lap var: —  |  Tenengrad: —  |  Brenner: —")
         self._focus_raw_lbl.setStyleSheet("color:#555577; font-size:9px; font-family:Consolas;")
         self._focus_raw_lbl.setWordWrap(True)
-        layout.addWidget(self._focus_raw_lbl)
+        box.addWidget(self._focus_raw_lbl)
 
-        # Scoring mode + reference info
         self._focus_mode_lbl = QLabel("Mode: RELATIVE (no reference)")
         self._focus_mode_lbl.setStyleSheet("color:#555577; font-size:9px;")
         self._focus_mode_lbl.setWordWrap(True)
-        layout.addWidget(self._focus_mode_lbl)
+        box.addWidget(self._focus_mode_lbl)
 
         self._layout.addWidget(box)
 
@@ -203,14 +259,12 @@ class InspectorPanel(QScrollArea):
     # ── Quality ────────────────────────────────────────────────────────────
 
     def _build_quality_group(self):
-        box = QGroupBox("Image Quality")
-        layout = QVBoxLayout(box)
-        layout.setSpacing(2)
+        box = CollapsibleSection("Image Quality", expanded=True)
 
         self._quality_verdict = QLabel("—")
         self._quality_verdict.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._quality_verdict.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        layout.addWidget(self._quality_verdict)
+        box.addWidget(self._quality_verdict)
 
         self._quality_score_row = MetricRow("Overall")
         self._exposure_row      = MetricRow("Exposure")
@@ -220,7 +274,7 @@ class InspectorPanel(QScrollArea):
 
         for row in [self._quality_score_row, self._exposure_row,
                     self._contrast_row, self._noise_row, self._snr_row]:
-            layout.addWidget(row)
+            box.addWidget(row)
 
         self._layout.addWidget(box)
 
@@ -245,8 +299,7 @@ class InspectorPanel(QScrollArea):
     # ── Histogram ──────────────────────────────────────────────────────────
 
     def _build_histogram_group(self):
-        self._hist_group = QGroupBox("Histogram")
-        layout = QVBoxLayout(self._hist_group)
+        self._hist_group = CollapsibleSection("Histogram", expanded=True)
 
         self._hist_widget = pg.PlotWidget()
         self._hist_widget.setBackground("#1a1a1a")
@@ -254,7 +307,7 @@ class InspectorPanel(QScrollArea):
         self._hist_widget.getAxis("left").hide()
         self._hist_widget.getAxis("bottom").setStyle(tickFont=None)
         self._hist_widget.setMouseEnabled(False, False)
-        layout.addWidget(self._hist_widget)
+        self._hist_group.addWidget(self._hist_widget)
 
         self._layout.addWidget(self._hist_group)
         self._hist_visible = True
@@ -276,8 +329,7 @@ class InspectorPanel(QScrollArea):
     # ── Pixel inspector ────────────────────────────────────────────────────
 
     def _build_pixel_group(self):
-        box = QGroupBox("Pixel Inspector")
-        layout = QGridLayout(box)
+        box = CollapsibleSection("Pixel Inspector", expanded=True)
 
         self._px_coord  = QLabel("X: — Y: —")
         self._px_r      = QLabel("R: —")
@@ -288,12 +340,16 @@ class InspectorPanel(QScrollArea):
         self._px_swatch.setFixedSize(24, 24)
         self._px_swatch.setStyleSheet("background: #333; border: 1px solid #555;")
 
+        px_grid_widget = QWidget()
+        layout = QGridLayout(px_grid_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._px_coord,  0, 0, 1, 2)
         layout.addWidget(self._px_swatch, 1, 0)
         layout.addWidget(self._px_r,      1, 1)
         layout.addWidget(self._px_g,      2, 1)
         layout.addWidget(self._px_b,      3, 1)
         layout.addWidget(self._px_gray,   2, 0)
+        box.addWidget(px_grid_widget)
 
         self._layout.addWidget(box)
 
@@ -330,15 +386,12 @@ class InspectorPanel(QScrollArea):
     # ── ROI Analysis ───────────────────────────────────────────────────────
 
     def _build_roi_group(self):
-        self._roi_group = QGroupBox("ROI Analysis")
-        layout = QVBoxLayout(self._roi_group)
-        layout.setSpacing(3)
+        self._roi_group = CollapsibleSection("ROI Analysis", expanded=True)
 
         self._roi_size_lbl = QLabel("Draw a rectangle on the image")
         self._roi_size_lbl.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
-        layout.addWidget(self._roi_size_lbl)
+        self._roi_group.addWidget(self._roi_size_lbl)
 
-        # Stats table: header + R/G/B/Gray rows
         tbl = QWidget()
         g = QGridLayout(tbl)
         g.setContentsMargins(0, 0, 0, 0)
@@ -365,7 +418,7 @@ class InspectorPanel(QScrollArea):
                 cells.append(lbl)
             self._roi_cells[ch] = cells
 
-        layout.addWidget(tbl)
+        self._roi_group.addWidget(tbl)
         self._roi_group.setVisible(False)
         self._layout.addWidget(self._roi_group)
 
@@ -404,13 +457,11 @@ class InspectorPanel(QScrollArea):
     # ── Line Profile ───────────────────────────────────────────────────────
 
     def _build_profile_group(self):
-        self._profile_group = QGroupBox("Intensity Line Profile")
-        layout = QVBoxLayout(self._profile_group)
-        layout.setSpacing(3)
+        self._profile_group = CollapsibleSection("Intensity Line Profile", expanded=True)
 
         self._profile_length_lbl = QLabel("Draw a line on the image")
         self._profile_length_lbl.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
-        layout.addWidget(self._profile_length_lbl)
+        self._profile_group.addWidget(self._profile_length_lbl)
 
         self._profile_plot = pg.PlotWidget()
         self._profile_plot.setBackground("#0D0D1A")
@@ -421,11 +472,11 @@ class InspectorPanel(QScrollArea):
         self._profile_plot.setMouseEnabled(False, False)
         self._profile_plot.setLabel("bottom", "px along line", color="#888899", size="8pt")
         self._profile_plot.setLabel("left", "intensity", color="#888899", size="8pt")
-        layout.addWidget(self._profile_plot)
+        self._profile_group.addWidget(self._profile_plot)
 
         self._profile_stats_lbl = QLabel("")
         self._profile_stats_lbl.setStyleSheet("color:#888899; font-size:9px;")
-        layout.addWidget(self._profile_stats_lbl)
+        self._profile_group.addWidget(self._profile_stats_lbl)
 
         self._profile_group.setVisible(False)
         self._layout.addWidget(self._profile_group)
@@ -477,13 +528,11 @@ class InspectorPanel(QScrollArea):
     }
 
     def _build_annotation_group(self):
-        self._ann_group = QGroupBox("Annotations")
-        layout = QVBoxLayout(self._ann_group)
-        layout.setSpacing(4)
+        self._ann_group = CollapsibleSection("Annotations", expanded=True)
 
         self._ann_hint = QLabel("Click image to place markers")
         self._ann_hint.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
-        layout.addWidget(self._ann_hint)
+        self._ann_group.addWidget(self._ann_hint)
 
         self._ann_table = QTableWidget(0, 4)
         self._ann_table.setHorizontalHeaderLabels(["#", "Label", "X", "Y"])
@@ -500,7 +549,7 @@ class InspectorPanel(QScrollArea):
             "QHeaderView::section { background:#141428; color:#00B4D8; "
             "border:none; padding:2px; font-size:9px; }"
         )
-        layout.addWidget(self._ann_table)
+        self._ann_group.addWidget(self._ann_table)
 
         btn_row = QHBoxLayout()
         self._ann_clear_btn = QPushButton("Clear All")
@@ -515,7 +564,7 @@ class InspectorPanel(QScrollArea):
         btn_row.addWidget(self._ann_count_lbl)
         btn_row.addStretch()
         btn_row.addWidget(self._ann_clear_btn)
-        layout.addLayout(btn_row)
+        self._ann_group.addLayout(btn_row)
 
         self._ann_group.setVisible(False)
         self._layout.addWidget(self._ann_group)
@@ -553,15 +602,15 @@ class InspectorPanel(QScrollArea):
     # ── Measurement ────────────────────────────────────────────────────────
 
     def _build_measure_group(self):
-        self._measure_group = QGroupBox("Measurement")
-        layout = QVBoxLayout(self._measure_group)
-        layout.setSpacing(4)
+        self._measure_group = CollapsibleSection("Measurement", expanded=True)
 
         self._meas_hint = QLabel("Drag on the image to measure distance")
         self._meas_hint.setStyleSheet("color:#555566; font-size:10px; font-style:italic;")
-        layout.addWidget(self._meas_hint)
+        self._measure_group.addWidget(self._meas_hint)
 
-        grid = QGridLayout()
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(3)
 
         def _row_lbl(text):
@@ -591,16 +640,16 @@ class InspectorPanel(QScrollArea):
         grid.addWidget(self._meas_dy,         3, 1)
         grid.addWidget(_row_lbl("Angle"),     4, 0)
         grid.addWidget(self._meas_angle,      4, 1)
-        layout.addLayout(grid)
+        self._measure_group.addWidget(grid_widget)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#1A1A2A;")
-        layout.addWidget(sep)
+        self._measure_group.addWidget(sep)
 
         self._calib_lbl = QLabel("Scale: not calibrated")
         self._calib_lbl.setStyleSheet("color:#555566; font-size:9px;")
-        layout.addWidget(self._calib_lbl)
+        self._measure_group.addWidget(self._calib_lbl)
 
         self._measure_group.setVisible(False)
         self._layout.addWidget(self._measure_group)
