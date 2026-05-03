@@ -15,7 +15,7 @@ import cv2
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QScrollArea, QFileDialog, QDoubleSpinBox,
+    QScrollArea, QFileDialog, QDoubleSpinBox, QComboBox, QCheckBox,
     QButtonGroup, QSlider, QStackedWidget, QSizePolicy, QFrame,
     QListWidget, QListWidgetItem, QAbstractItemView,
 )
@@ -33,38 +33,41 @@ _CYAN  = "#00B4D8"
 _AMBER = "#D4840A"
 
 _BTN_MODE_ON = (
-    "QPushButton { background:#003040; color:#00E5FF; border:1px solid #00B4D8;"
-    "  border-radius:3px; padding:3px 8px; font-size:10px; font-weight:700; }"
+    "QPushButton { background:#003040; color:#00E5FF; border:2px solid #00B4D8;"
+    "  border-radius:4px; padding:5px 8px; font-size:11px; font-weight:700; }"
 )
 _BTN_MODE_OFF = (
-    "QPushButton { background:#0A1420; color:#556677; border:1px solid #1A2A3A;"
-    "  border-radius:3px; padding:3px 8px; font-size:10px; }"
-    "QPushButton:hover { background:#111F2E; color:#AABBCC; border-color:#2A3A4A; }"
+    "QPushButton { background:#0A1420; color:#7799AA; border:1px solid #1E2E3E;"
+    "  border-radius:4px; padding:5px 8px; font-size:11px; }"
+    "QPushButton:hover { background:#111F2E; color:#CCDDEE; border-color:#2A3A4A; }"
 )
 _BTN_OUT_ON = (
-    "QPushButton { background:#0A2800; color:#2ECC71; border:1px solid #2ECC71;"
-    "  border-radius:3px; padding:2px 8px; font-size:10px; font-weight:700; }"
+    "QPushButton { background:#0A2800; color:#2ECC71; border:2px solid #2ECC71;"
+    "  border-radius:4px; padding:4px 8px; font-size:11px; font-weight:700; }"
 )
 _BTN_OUT_OFF = (
-    "QPushButton { background:#0A1420; color:#445566; border:1px solid #1A2A3A;"
-    "  border-radius:3px; padding:2px 8px; font-size:10px; }"
-    "QPushButton:hover { background:#111F2E; color:#AABBCC; }"
+    "QPushButton { background:#0A1420; color:#556677; border:1px solid #1E2E3E;"
+    "  border-radius:4px; padding:4px 8px; font-size:11px; }"
+    "QPushButton:hover { background:#111F2E; color:#CCDDEE; }"
 )
 _BTN_COMPOSE = (
     "QPushButton { background:#1565C0; color:#FFFFFF; border:none; border-radius:4px;"
-    "  padding:5px 16px; font-size:11px; font-weight:700; }"
+    "  padding:7px 16px; font-size:12px; font-weight:700; }"
     "QPushButton:hover { background:#1976D2; }"
     "QPushButton:disabled { background:#1A2A3A; color:#445566; }"
 )
 _BTN_FIT = (
     "QPushButton { background:#2A0A3A; color:#CC88FF; border:1px solid #5A3A7A;"
-    "  border-radius:4px; padding:4px 12px; font-size:10px; font-weight:700; }"
+    "  border-radius:4px; padding:5px 12px; font-size:11px; font-weight:700; }"
     "QPushButton:hover { background:#3A1A4A; }"
     "QPushButton:disabled { background:#1A2A3A; color:#445566; }"
 )
 _SPIN = (
-    "QDoubleSpinBox { background:#0E1820; color:#CCDDEE; border:1px solid #2A3A4A;"
-    "  border-radius:3px; padding:1px 3px; font-size:10px; }"
+    "QDoubleSpinBox, QComboBox {"
+    "  background:#0E1820; color:#E0EEF8; border:1px solid #2A3A4A;"
+    "  border-radius:3px; padding:2px 4px; font-size:11px; font-weight:600; }"
+    "QComboBox::drop-down { border:none; }"
+    "QComboBox QAbstractItemView { background:#0E1820; color:#E0EEF8; }"
 )
 
 
@@ -123,14 +126,18 @@ class FusionRow(QWidget):
         rgb_lay.setContentsMargins(0, 0, 0, 0)
         rgb_lay.setSpacing(6)
 
-        from PyQt6.QtWidgets import QCheckBox
         self._cb_r = QCheckBox("R"); self._cb_g = QCheckBox("G"); self._cb_b = QCheckBox("B")
         for cb, col, tip in [
-            (self._cb_r, "#FF5555", "Assign this image to the Red channel of the composite."),
-            (self._cb_g, "#55EE55", "Assign this image to the Green channel of the composite."),
-            (self._cb_b, "#5599FF", "Assign this image to the Blue channel of the composite."),
+            (self._cb_r, "#FF6666", "Assign this image to the Red channel of the composite."),
+            (self._cb_g, "#66EE66", "Assign this image to the Green channel of the composite."),
+            (self._cb_b, "#6699FF", "Assign this image to the Blue channel of the composite."),
         ]:
-            cb.setStyleSheet(f"color:{col}; font-size:11px; font-weight:700;")
+            cb.setStyleSheet(
+                f"color:{col}; font-size:12px; font-weight:700;"
+                f"QCheckBox::indicator {{ width:14px; height:14px; }}"
+                f"QCheckBox::indicator:checked {{ background:{col}; border-radius:3px; }}"
+                f"QCheckBox::indicator:unchecked {{ background:#1A2A3A; border:1px solid #3A4A5A; border-radius:3px; }}"
+            )
             cb.setToolTip(tip)
             cb.stateChanged.connect(self._on_rgb)
             rgb_lay.addWidget(cb)
@@ -550,34 +557,77 @@ class FusionPanel(QWidget):
 
     def _build_stat_panel(self) -> QWidget:
         w = QWidget()
-        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(5)
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
         lay.addWidget(self._make_section_label("OPERATION"))
         self._stat_sel = "Max"
         self._stat_group = QButtonGroup(self)
         self._stat_btns: dict[str, QPushButton] = {}
-        row = QHBoxLayout(); row.setSpacing(3); row.setContentsMargins(0,0,0,0)
+
         _STAT_TIPS = {
-            "Max":     "Each output pixel = brightest value across all images.\nBest for revealing bright defects, protrusions, and high-reflectance spots.",
-            "Min":     "Each output pixel = darkest value across all images.\nBest for revealing pits, voids, and shadows that appear in at least one light angle.",
-            "Average": "Each output pixel = mean of all images.\nReduces noise and balances exposure. Good general-purpose starting point.",
+            "Max":        "Pixel = brightest across all images.\nReveals bright defects, protrusions, high-reflectance spots.",
+            "Min":        "Pixel = darkest across all images.\nReveals pits, voids, shadows visible in any one light.",
+            "Average":    "Pixel = mean of all images.\nReduces noise, balances exposure.",
+            "Difference": "| Image A − Image B | per pixel.\nAnything that changed between the two lighting angles becomes bright.\nFlat background = black. Defect = white.\nMost powerful tool for finding what lighting angle reveals.",
         }
+
+        # Row 1: Max / Min / Average
+        row1 = QHBoxLayout(); row1.setSpacing(3); row1.setContentsMargins(0,0,0,0)
         for op in ["Max", "Min", "Average"]:
             btn = QPushButton(op); btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.setToolTip(_STAT_TIPS[op])
             self._stat_group.addButton(btn); self._stat_btns[op] = btn
             btn.clicked.connect(lambda _, o=op: self._set_stat(o))
-            row.addWidget(btn)
+            row1.addWidget(btn)
+        lay.addLayout(row1)
+
+        # Row 2: Difference (full width)
+        diff_btn = QPushButton("| A − B |   Difference")
+        diff_btn.setCheckable(True)
+        diff_btn.setToolTip(_STAT_TIPS["Difference"])
+        diff_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._stat_group.addButton(diff_btn)
+        self._stat_btns["Difference"] = diff_btn
+        diff_btn.clicked.connect(lambda: self._set_stat("Difference"))
+        lay.addWidget(diff_btn)
+
         self._stat_btns["Max"].setChecked(True)
         self._refresh_stat_styles("Max")
-        lay.addLayout(row)
-        tip = QLabel(
-            "Max = brightest pixel (bright defects).\n"
-            "Min = darkest pixel (pits, shadows).\n"
-            "Average = balanced exposure blend."
+
+        # A / B selectors — shown only when Difference is selected
+        self._diff_widget = QWidget()
+        self._diff_widget.setVisible(False)
+        diff_lay = QVBoxLayout(self._diff_widget)
+        diff_lay.setContentsMargins(0, 4, 0, 0)
+        diff_lay.setSpacing(4)
+
+        for attr, label, tip in [
+            ("_diff_a", "Image A  (subtract from)",
+             "The base image — the reference lighting angle.\nTypically: flat/overhead light."),
+            ("_diff_b", "Image B  (subtract)",
+             "The second image — the comparison lighting angle.\nTypically: side or grazing light."),
+        ]:
+            row = QHBoxLayout(); row.setSpacing(6)
+            lbl = QLabel(label)
+            lbl.setFixedWidth(130)
+            lbl.setStyleSheet(f"color:{_TEXT}; font-size:10px;")
+            lbl.setToolTip(tip)
+            combo = QComboBox()
+            combo.setStyleSheet(_SPIN)
+            combo.setToolTip(tip)
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            setattr(self, attr + "_combo", combo)
+            row.addWidget(lbl); row.addWidget(combo)
+            diff_lay.addLayout(row)
+
+        hint = QLabel(
+            "Result = |A − B| per pixel.\n"
+            "Flat surface → same in both lights → black.\n"
+            "Scratch / defect → different → bright white."
         )
-        tip.setStyleSheet(f"color:{_DIM}; font-size:9px;"); tip.setWordWrap(True)
-        lay.addWidget(tip)
+        hint.setStyleSheet(f"color:{_DIM}; font-size:9px;"); hint.setWordWrap(True)
+        diff_lay.addWidget(hint)
+        lay.addWidget(self._diff_widget)
         return w
 
     # ── Style helpers ─────────────────────────────────────────────────────────
@@ -617,7 +667,25 @@ class FusionPanel(QWidget):
         self._ps_sel = lbl; self._refresh_ps_styles(lbl)
 
     def _set_stat(self, op: str):
-        self._stat_sel = op; self._refresh_stat_styles(op)
+        self._stat_sel = op
+        self._refresh_stat_styles(op)
+        self._diff_widget.setVisible(op == "Difference")
+        if op == "Difference":
+            self._refresh_diff_combos()
+
+    def _refresh_diff_combos(self):
+        names = [os.path.basename(e.path) for e in self.fusion.entries]
+        for combo in [self._diff_a_combo, self._diff_b_combo]:
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(names)
+            idx = combo.findText(current)
+            combo.setCurrentIndex(max(idx, 0))
+            combo.blockSignals(False)
+        # Default: A=first, B=second
+        if self._diff_b_combo.count() > 1 and self._diff_b_combo.currentIndex() == 0:
+            self._diff_b_combo.setCurrentIndex(1)
 
     # ── Image management ──────────────────────────────────────────────────────
 
@@ -647,6 +715,7 @@ class FusionPanel(QWidget):
             self._sl.addWidget(row)
             self._hint.setVisible(False)
             self._rti_fitted = False
+            self._refresh_diff_combos()
         except Exception as e:
             self._status.setText(f"Load failed: {e}")
 
@@ -659,6 +728,7 @@ class FusionPanel(QWidget):
         for i, r in enumerate(self._rows): r.index = i
         self._hint.setVisible(len(self._rows) == 0)
         self._rti_fitted = False
+        self._refresh_diff_combos()
 
     def _clear(self):
         for row in self._rows:
@@ -689,9 +759,14 @@ class FusionPanel(QWidget):
             az = self._rti_az_sld.value(); el = self._rti_el_sld.value()
             fn = lambda: self.fusion.rti_relight(az, el)
         else:
-            ops = {"Max": self.fusion.max_fusion, "Min": self.fusion.min_fusion,
-                   "Average": self.fusion.average_fusion}
-            fn  = ops.get(self._stat_sel, self.fusion.max_fusion)
+            if self._stat_sel == "Difference":
+                idx_a = self._diff_a_combo.currentIndex()
+                idx_b = self._diff_b_combo.currentIndex()
+                fn = lambda: self.fusion.difference(idx_a, idx_b)
+            else:
+                ops = {"Max": self.fusion.max_fusion, "Min": self.fusion.min_fusion,
+                       "Average": self.fusion.average_fusion}
+                fn  = ops.get(self._stat_sel, self.fusion.max_fusion)
 
         self._status.setText("⏳ Processing…")
         self._compose_btn.setEnabled(False)

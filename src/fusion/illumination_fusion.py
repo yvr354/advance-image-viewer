@@ -98,6 +98,20 @@ class IlluminationFusion:
     def average_fusion(self) -> Optional[np.ndarray]:
         return self._pixel_stat("avg")
 
+    def difference(self, idx_a: int = 0, idx_b: int = 1) -> Optional[np.ndarray]:
+        """
+        |A − B| per pixel — absolute difference between two images.
+        Flat surface (identical in both lights) → black.
+        Defect (reacts differently to each light) → bright.
+        """
+        if idx_a >= len(self.entries) or idx_b >= len(self.entries):
+            return None
+        h, w = self.entries[0].image.shape[:2]
+        a = self._fit(self.entries[idx_a].image, h, w).astype(np.float64)
+        b = self._fit(self.entries[idx_b].image, h, w).astype(np.float64)
+        diff = np.abs(a - b)
+        return self._norm8(diff)
+
     def _pixel_stat(self, mode: str) -> Optional[np.ndarray]:
         if not self.entries:
             return None
