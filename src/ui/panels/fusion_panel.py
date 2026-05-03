@@ -124,8 +124,13 @@ class FusionRow(QWidget):
 
         from PyQt6.QtWidgets import QCheckBox
         self._cb_r = QCheckBox("R"); self._cb_g = QCheckBox("G"); self._cb_b = QCheckBox("B")
-        for cb, col in [(self._cb_r, "#FF5555"), (self._cb_g, "#55EE55"), (self._cb_b, "#5599FF")]:
+        for cb, col, tip in [
+            (self._cb_r, "#FF5555", "Assign this image to the Red channel of the composite."),
+            (self._cb_g, "#55EE55", "Assign this image to the Green channel of the composite."),
+            (self._cb_b, "#5599FF", "Assign this image to the Blue channel of the composite."),
+        ]:
             cb.setStyleSheet(f"color:{col}; font-size:10px; font-weight:700;")
+            cb.setToolTip(tip)
             cb.stateChanged.connect(self._on_rgb)
             rgb_lay.addWidget(cb)
 
@@ -133,6 +138,11 @@ class FusionRow(QWidget):
         self._w_spin.setRange(0.0, 2.0); self._w_spin.setSingleStep(0.1)
         self._w_spin.setValue(1.0); self._w_spin.setFixedWidth(54)
         self._w_spin.setStyleSheet(_SPIN); self._w_spin.setPrefix("w:")
+        self._w_spin.setToolTip(
+            "Channel weight (0–2).\n"
+            "1.0 = normal contribution.\n"
+            "Increase to make this light angle dominate the composite."
+        )
         self._w_spin.valueChanged.connect(self._on_rgb)
         rgb_lay.addWidget(self._w_spin)
         lay.addWidget(self._rgb_w)
@@ -151,6 +161,19 @@ class FusionRow(QWidget):
             sp.setRange(0, 360 if txt == "Az:" else 90)
             sp.setSingleStep(5); sp.setValue(0 if txt == "Az:" else 45)
             sp.setFixedWidth(58); sp.setStyleSheet(_SPIN); sp.setSuffix("°")
+            if txt == "Az:":
+                sp.setToolTip(
+                    "Azimuth — horizontal angle of the light source (0–360°).\n"
+                    "0° = right, 90° = top, 180° = left, 270° = bottom.\n"
+                    "Distribute lights evenly: 0°, 90°, 180°, 270° for 4-light setups."
+                )
+            else:
+                sp.setToolTip(
+                    "Elevation — vertical angle of the light above the surface (0–90°).\n"
+                    "0° = grazing (side-lit, reveals texture).\n"
+                    "90° = overhead (flat, minimal shadow).\n"
+                    "45° is the recommended default for defect inspection."
+                )
             sp.valueChanged.connect(self._on_angles)
             ang_lay.addWidget(sp)
             if txt == "Az:": self._az_sp = sp
@@ -164,6 +187,7 @@ class FusionRow(QWidget):
         # Delete
         del_btn = QPushButton("✕")
         del_btn.setFixedSize(18, 18)
+        del_btn.setToolTip("Remove this image from the fusion set.")
         del_btn.setStyleSheet(
             "QPushButton{background:#1A0808;color:#AA4444;border:none;border-radius:3px;font-size:9px;}"
             "QPushButton:hover{background:#2A1010;color:#FF6666;}"
@@ -224,12 +248,38 @@ class FusionPanel(QWidget):
         root.addWidget(self._make_section_label("MODE"))
         self._mode_btns: dict[str, QPushButton] = {}
         self._mode_group = QButtonGroup(self)
+        _MODE_TIPS = {
+            "RGB Composite": (
+                "Assign each image to a colour channel (R, G, B) with a weight.\n"
+                "Defects hidden under one lighting angle become colour-visible in the merged image.\n"
+                "Example: front-light → R, left-light → G, right-light → B."
+            ),
+            "Photometric Stereo": (
+                "Woodham (1980) algorithm — industry gold standard used in Halcon and Cognex.\n"
+                "Computes a surface normal for every pixel from ≥ 3 images.\n"
+                "Outputs: Gradient Magnitude (best defect signal), Normal Map, Albedo, Height Map.\n"
+                "Set the azimuth and elevation for each light source in the image list."
+            ),
+            "RTI Relight": (
+                "Reflectance Transformation Imaging — fits a 6-coefficient polynomial per pixel.\n"
+                "After fitting, drag the Azimuth and Elevation sliders to relight the surface\n"
+                "in real time and find the angle that best reveals a subtle defect.\n"
+                "Requires ≥ 6 images. Fit is slow once; relighting is instant."
+            ),
+            "Max / Min / Avg": (
+                "Simple pixel-wise statistics across all loaded images.\n"
+                "Max — brightest pixel wins: emphasises bright defects and high-reflectance areas.\n"
+                "Min — darkest pixel wins: reveals pits, shadows, and low-reflectance defects.\n"
+                "Average — balanced blend: reduces noise, good for general exposure improvement."
+            ),
+        }
         row1 = QHBoxLayout(); row1.setSpacing(3); row1.setContentsMargins(0,0,0,0)
         row2 = QHBoxLayout(); row2.setSpacing(3); row2.setContentsMargins(0,0,0,0)
         for i, m in enumerate(self._MODES):
             btn = QPushButton(m)
             btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setToolTip(_MODE_TIPS[m])
             self._mode_group.addButton(btn)
             self._mode_btns[m] = btn
             btn.clicked.connect(lambda _, mode=m: self._on_mode(mode))
@@ -244,18 +294,20 @@ class FusionPanel(QWidget):
         img_bar = QHBoxLayout()
         img_bar.addWidget(self._make_section_label("IMAGES"))
         img_bar.addStretch(1)
-        for label, slot, style in [
+        for label, slot, style, tip in [
             ("＋ Add",  self._add_images,
              f"QPushButton{{background:#0E2030;color:{_CYAN};border:1px solid {_CYAN};"
              "border-radius:3px;padding:2px 8px;font-size:10px;font-weight:600;}}"
-             "QPushButton:hover{background:#0A3040;}"),
+             "QPushButton:hover{background:#0A3040;}",
+             "Load one or more images captured of the same scene\nunder different lighting angles."),
             ("Clear", self._clear,
              "QPushButton{background:#200A0A;color:#DD4444;border:1px solid #552222;"
              "border-radius:3px;padding:2px 8px;font-size:10px;}"
-             "QPushButton:hover{background:#300A0A;}"),
+             "QPushButton:hover{background:#300A0A;}",
+             "Remove all images and reset the fusion."),
         ]:
             b = QPushButton(label); b.setFixedHeight(22); b.setStyleSheet(style)
-            b.clicked.connect(slot)
+            b.setToolTip(tip); b.clicked.connect(slot)
             img_bar.addWidget(b)
         root.addLayout(img_bar)
 
@@ -299,6 +351,10 @@ class FusionPanel(QWidget):
         # Compose
         self._compose_btn = QPushButton("▶  Compose")
         self._compose_btn.setStyleSheet(_BTN_COMPOSE)
+        self._compose_btn.setToolTip(
+            "Run the selected fusion algorithm and display the result in the main viewer.\n"
+            "The result can then be processed further with the Filter Pipeline."
+        )
         self._compose_btn.clicked.connect(self._compose)
         root.addWidget(self._compose_btn)
 
@@ -330,6 +386,30 @@ class FusionPanel(QWidget):
         lay.addWidget(tip)
 
         lay.addWidget(self._make_section_label("OUTPUT"))
+        _PS_TIPS = {
+            "Gradient Magnitude": (
+                "Best defect signal for most inspections.\n"
+                "Shows how sharply the surface slope changes at each pixel.\n"
+                "Scratches, pits, and edges appear as bright bands.\n"
+                "Feed this into the Filter Pipeline → Canny or False Color for further analysis."
+            ),
+            "Normal Map": (
+                "Surface orientation encoded as RGB colour (Halcon standard).\n"
+                "Red = X slope, Green = Y slope, Blue = surface facing camera.\n"
+                "Useful for visualising surface topology and checking light calibration."
+            ),
+            "Albedo": (
+                "Surface reflectivity with lighting removed.\n"
+                "Shows true material colour and texture, independent of light angle.\n"
+                "Use to detect stains, discolouration, or coating defects."
+            ),
+            "Height Map": (
+                "3-D depth reconstruction via Frankot-Chellappa integration.\n"
+                "Bright = raised, Dark = recessed.\n"
+                "Use for dents, bumps, warps, and embossed/engraved features.\n"
+                "Accuracy depends on having well-distributed light angles."
+            ),
+        }
         self._ps_outputs = ["Gradient Magnitude", "Normal Map", "Albedo", "Height Map"]
         self._ps_sel = self._ps_outputs[0]
         self._ps_group = QButtonGroup(self)
@@ -339,6 +419,7 @@ class FusionPanel(QWidget):
         for i, lbl in enumerate(self._ps_outputs):
             btn = QPushButton(lbl); btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setToolTip(_PS_TIPS[lbl])
             self._ps_group.addButton(btn); self._ps_btns[lbl] = btn
             btn.clicked.connect(lambda _, l=lbl: self._set_ps_out(l))
             (r1 if i < 2 else r2).addWidget(btn)
@@ -365,12 +446,30 @@ class FusionPanel(QWidget):
 
         self._rti_fit_btn = QPushButton("⚙  Fit RTI Polynomials")
         self._rti_fit_btn.setStyleSheet(_BTN_FIT)
+        self._rti_fit_btn.setToolTip(
+            "Fit a 6-coefficient biquadratic polynomial to every pixel across all images.\n"
+            "This is a one-time computation — may take 5–30 seconds for large images.\n"
+            "After fitting, the Azimuth and Elevation sliders relight the surface instantly.\n"
+            "Drag the sliders to find the light angle that best reveals a hidden defect."
+        )
         self._rti_fit_btn.clicked.connect(self._fit_rti)
         lay.addWidget(self._rti_fit_btn)
 
         self._rti_sliders = QWidget(); self._rti_sliders.setVisible(False)
         sl_lay = QVBoxLayout(self._rti_sliders); sl_lay.setContentsMargins(0,0,0,0); sl_lay.setSpacing(4)
 
+        _RTI_TIPS = {
+            "_rti_az": (
+                "Azimuth — horizontal light direction (0–360°).\n"
+                "Drag left/right to rotate the virtual light around the surface.\n"
+                "Scratches and grooves are most visible when the light is perpendicular to them."
+            ),
+            "_rti_el": (
+                "Elevation — vertical light angle above the surface (0–90°).\n"
+                "Low values (5–20°) = grazing light — reveals fine texture and scratches.\n"
+                "High values (60–90°) = overhead light — reduces shadows, shows colour/albedo."
+            ),
+        }
         for attr, label, mn, mx, default in [
             ("_rti_az", "Azimuth",   0, 360, 0),
             ("_rti_el", "Elevation", 0,  90, 45),
@@ -380,6 +479,7 @@ class FusionPanel(QWidget):
             lbl.setStyleSheet(f"color:{_DIM}; font-size:10px;")
             sld = QSlider(Qt.Orientation.Horizontal)
             sld.setRange(mn, mx); sld.setValue(default)
+            sld.setToolTip(_RTI_TIPS[attr])
             val_lbl = QLabel(f"{default:3d}°")
             val_lbl.setFixedWidth(32)
             val_lbl.setStyleSheet(f"color:{_CYAN}; font-size:10px;")
@@ -405,9 +505,15 @@ class FusionPanel(QWidget):
         self._stat_group = QButtonGroup(self)
         self._stat_btns: dict[str, QPushButton] = {}
         row = QHBoxLayout(); row.setSpacing(3); row.setContentsMargins(0,0,0,0)
+        _STAT_TIPS = {
+            "Max":     "Each output pixel = brightest value across all images.\nBest for revealing bright defects, protrusions, and high-reflectance spots.",
+            "Min":     "Each output pixel = darkest value across all images.\nBest for revealing pits, voids, and shadows that appear in at least one light angle.",
+            "Average": "Each output pixel = mean of all images.\nReduces noise and balances exposure. Good general-purpose starting point.",
+        }
         for op in ["Max", "Min", "Average"]:
             btn = QPushButton(op); btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setToolTip(_STAT_TIPS[op])
             self._stat_group.addButton(btn); self._stat_btns[op] = btn
             btn.clicked.connect(lambda _, o=op: self._set_stat(o))
             row.addWidget(btn)
