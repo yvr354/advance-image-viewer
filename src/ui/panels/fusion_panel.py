@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QScrollArea, QFileDialog, QDoubleSpinBox,
     QButtonGroup, QSlider, QStackedWidget, QSizePolicy, QFrame,
+    QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 
@@ -290,9 +291,63 @@ class FusionPanel(QWidget):
         root.addLayout(row2)
         root.addWidget(_sep())
 
+        # ── From current folder ──────────────────────────────────────────
+        self._folder_section = QWidget()
+        fs_lay = QVBoxLayout(self._folder_section)
+        fs_lay.setContentsMargins(0, 0, 0, 0)
+        fs_lay.setSpacing(3)
+
+        folder_hdr = QHBoxLayout()
+        folder_lbl = self._make_section_label("FROM CURRENT FOLDER")
+        folder_lbl.setToolTip(
+            "Images already open in the left browser.\n"
+            "Double-click any filename to add it to the fusion set."
+        )
+        self._folder_count = QLabel("")
+        self._folder_count.setStyleSheet(f"color:{_DIM}; font-size:9px;")
+        folder_hdr.addWidget(folder_lbl)
+        folder_hdr.addStretch(1)
+        folder_hdr.addWidget(self._folder_count)
+        fs_lay.addLayout(folder_hdr)
+
+        self._folder_list = QListWidget()
+        self._folder_list.setFixedHeight(100)
+        self._folder_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._folder_list.setStyleSheet(
+            "QListWidget { background:#0A1218; border:1px solid #1A2A3A; border-radius:3px;"
+            f"  color:{_TEXT}; font-size:10px; outline:none; }}"
+            "QListWidget::item { padding:2px 6px; }"
+            "QListWidget::item:selected { background:#003040; color:#00E5FF; }"
+            "QListWidget::item:hover { background:#111F2E; }"
+        )
+        self._folder_list.setToolTip(
+            "Double-click a filename to add it to the fusion set.\n"
+            "Select multiple with Ctrl/Shift, then click Add Selected."
+        )
+        self._folder_list.itemDoubleClicked.connect(self._add_from_folder_item)
+        fs_lay.addWidget(self._folder_list)
+
+        add_sel_btn = QPushButton("＋ Add Selected to Fusion")
+        add_sel_btn.setFixedHeight(22)
+        add_sel_btn.setStyleSheet(
+            f"QPushButton{{background:#0A1A10;color:#2ECC71;border:1px solid #2ECC71;"
+            f"border-radius:3px;padding:2px 8px;font-size:10px;font-weight:600;}}"
+            f"QPushButton:hover{{background:#0A2A18;}}"
+        )
+        add_sel_btn.setToolTip(
+            "Add all selected images from the folder list to the fusion set.\n"
+            "Use Ctrl+Click or Shift+Click to select multiple files."
+        )
+        add_sel_btn.clicked.connect(self._add_selected_from_folder)
+        fs_lay.addWidget(add_sel_btn)
+
+        self._folder_section.setVisible(False)   # hidden until a folder is loaded
+        root.addWidget(self._folder_section)
+        root.addWidget(_sep())
+
         # Image list
         img_bar = QHBoxLayout()
-        img_bar.addWidget(self._make_section_label("IMAGES"))
+        img_bar.addWidget(self._make_section_label("FUSION SET"))
         img_bar.addStretch(1)
         for label, slot, style, tip in [
             ("＋ Add",  self._add_images,
@@ -695,3 +750,28 @@ class FusionPanel(QWidget):
         if result is not None:
             out = cv2.cvtColor(result, cv2.COLOR_GRAY2RGB) if result.ndim == 2 else result
             self.composite_ready.emit(out)
+
+    # ── Folder image picker ───────────────────────────────────────────────────
+
+    def set_folder_images(self, paths: list[str]):
+        """Called by main_window whenever the browser folder changes."""
+        self._folder_paths: list[str] = list(paths)
+        self._folder_list.clear()
+        for path in paths:
+            item = QListWidgetItem(os.path.basename(path))
+            item.setToolTip(path)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            self._folder_list.addItem(item)
+        count = len(paths)
+        self._folder_count.setText(f"{count} image{'s' if count != 1 else ''}")
+        self._folder_section.setVisible(count > 0)
+
+    def _add_from_folder_item(self, item: QListWidgetItem):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        self._add_single(path, self._current_mode())
+
+    def _add_selected_from_folder(self):
+        mode = self._current_mode()
+        for item in self._folder_list.selectedItems():
+            path = item.data(Qt.ItemDataRole.UserRole)
+            self._add_single(path, mode)

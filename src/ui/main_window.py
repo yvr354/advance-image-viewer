@@ -901,6 +901,7 @@ class MainWindow(QMainWindow):
         self.folder_images = list_images_in_folder(folder)
         self.folder_index = self.folder_images.index(path) if path in self.folder_images else -1
         self.browser.set_folder(folder)
+        self.fusion_panel.set_folder_images(self.folder_images)
         self.open_image(path)
 
     def _on_image_loaded(self, data):
@@ -1946,6 +1947,7 @@ class MainWindow(QMainWindow):
         self.folder_images = list_images_in_folder(folder)
         self.folder_index  = 0
         self.browser.set_folder(folder)
+        self.fusion_panel.set_folder_images(self.folder_images)
         if self.folder_images:
             self.open_image(self.folder_images[0])
 
