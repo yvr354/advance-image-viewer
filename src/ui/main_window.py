@@ -46,6 +46,24 @@ from src.ui.theme import VERDICT_COLOR, COLOR_PERFECT, COLOR_WARN, COLOR_FAIL
 
 # ── Background workers ─────────────────────────────────────────────────────
 
+class PipelineWorker(QThread):
+    """Runs pipeline.process() off the UI thread — heavy filters never freeze the window."""
+    done   = pyqtSignal(object)   # processed np.ndarray
+    failed = pyqtSignal(str)
+
+    def __init__(self, image: np.ndarray, pipeline):
+        super().__init__()
+        self._image    = image
+        self._pipeline = pipeline
+
+    def run(self):
+        try:
+            result = self._pipeline.process(self._image)
+            self.done.emit(result)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class ImageLoadWorker(QThread):
     """Loads image file off UI thread — large TIFFs/BMPs never freeze the window."""
     loaded  = pyqtSignal(object)   # ImageData
@@ -94,10 +112,17 @@ class MainWindow(QMainWindow):
         self.folder_index:  int       = -1
         self._analysis_worker: AnalysisWorker | None = None
         self._load_worker:    ImageLoadWorker | None = None
+        self._pipeline_worker: PipelineWorker | None = None
         self._active_mode = "Inspect"
         self._last_focus_result = None
         self._last_quality_result = None
         self._mm_per_px: float = 0.0
+
+        # Debounce timer — waits 300 ms after last slider/param change before running pipeline
+        self._pipeline_debounce = QTimer(self)
+        self._pipeline_debounce.setSingleShot(True)
+        self._pipeline_debounce.setInterval(300)
+        self._pipeline_debounce.timeout.connect(self._run_pipeline_worker)
 
         # Mask system
         from src.analysis.mask_engine import MaskData
@@ -421,11 +446,17 @@ class MainWindow(QMainWindow):
         self._status_zoom.setStyleSheet("color: #00B4D8; padding: 0 8px; font-weight: 600;")
         self._status_zoom.setAlignment(Qt.AlignmentFlag.AlignRight)
 
+        # Centre: pipeline loading indicator (hidden by default)
+        self._status_pipeline_lbl = QLabel("  ⏳ Applying filters…")
+        self._status_pipeline_lbl.setStyleSheet("color: #FFB347; padding: 0 8px; font-weight: 600;")
+        self._status_pipeline_lbl.setVisible(False)
+
         # Right: focus verdict badge
         self._status_verdict = QLabel("")
         self._status_verdict.setStyleSheet("padding: 0 10px; font-weight: 700;")
 
         sb.addWidget(self._status_main, stretch=1)
+        sb.addWidget(self._status_pipeline_lbl)
         sb.addPermanentWidget(self._status_verdict)
         sb.addPermanentWidget(self._status_zoom)
         self.setStatusBar(sb)
@@ -997,8 +1028,48 @@ class MainWindow(QMainWindow):
         self._update_focus_assist(focus_result, quality_result)
 
     def _on_pipeline_changed(self):
-        """Pipeline layer added/removed/changed → re-process and update all views."""
-        self._display_current(preserve_view=True)
+        """Pipeline changed → debounce 300 ms then run in background thread."""
+        self._pipeline_debounce.start()   # restarts timer if already running
+        self._set_pipeline_loading(True)
+
+    def _run_pipeline_worker(self):
+        """Called 300 ms after last pipeline change — starts background processing."""
+        if not self.current_image.is_loaded():
+            self._set_pipeline_loading(False)
+            return
+
+        # Cancel previous run if still going
+        if self._pipeline_worker and self._pipeline_worker.isRunning():
+            self._pipeline_worker.quit()
+            self._pipeline_worker.wait(200)
+
+        self._pipeline_worker = PipelineWorker(self.current_image.raw, self.pipeline)
+        self._pipeline_worker.done.connect(self._on_pipeline_done)
+        self._pipeline_worker.failed.connect(self._on_pipeline_failed)
+        self._pipeline_worker.start()
+
+    def _on_pipeline_done(self, processed: np.ndarray):
+        """Background pipeline finished — update all views on main thread."""
+        self.current_image.display = processed
+        self.viewer.set_image(processed, preserve_view=True)
+        self.surface_3d.set_image(processed)
+        hist_data = self.quality_engine.compute_histogram(processed, mask=self._mask_data)
+        self.inspector.update_histogram(hist_data)
+        self._set_pipeline_loading(False)
+
+    def _on_pipeline_failed(self, error: str):
+        self._set_pipeline_loading(False)
+        self._status_main.setText(f"  Filter error: {error}")
+
+    def _set_pipeline_loading(self, loading: bool):
+        """Show/hide processing indicator in status bar."""
+        if loading:
+            self._status_pipeline_lbl.setText("  ⏳ Applying filters…")
+            self._status_pipeline_lbl.setVisible(True)
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        else:
+            self._status_pipeline_lbl.setVisible(False)
+            QApplication.restoreOverrideCursor()
 
     def _on_composite_ready(self, composite: np.ndarray):
         """Fusion panel produced a composite → show in viewer and 3D."""
