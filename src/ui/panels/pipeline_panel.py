@@ -324,9 +324,6 @@ class PipelinePanel(QWidget):
         self._scroll.setVisible(False)
         root.addWidget(self._scroll, stretch=1)
 
-        # Absorb extra vertical space at the bottom, not inside the labels
-        root.addStretch(1)
-
     # ── Add Filter menu ───────────────────────────────────────────────────────
 
     def _show_add_menu(self):
