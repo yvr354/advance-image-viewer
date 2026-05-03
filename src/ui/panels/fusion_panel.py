@@ -1,189 +1,591 @@
-"""Multi-illumination fusion panel."""
+"""
+Illumination Fusion panel.
+
+Modes
+─────
+  RGB Composite      — assign images to R / G / B channels with weights
+  Photometric Stereo — Woodham least-squares normals; output selector
+  RTI Relight        — biquadratic PTM fit then interactive relighting
+  Max / Min / Avg    — simple pixel-wise statistics
+"""
 
 import os
 import numpy as np
 import cv2
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QScrollArea, QGroupBox, QCheckBox, QFileDialog, QSlider,
-    QComboBox, QDoubleSpinBox, QGridLayout,
+    QScrollArea, QFileDialog, QDoubleSpinBox,
+    QButtonGroup, QSlider, QStackedWidget, QSizePolicy, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 
 from src.fusion.illumination_fusion import IlluminationFusion
 from src.core.image_loader import load_image
 
 
-class FusionInputRow(QWidget):
-    changed = pyqtSignal()
+# ── Palette ────────────────────────────────────────────────────────────────────
+
+_DIM   = "#556677"
+_TEXT  = "#AABBCC"
+_CYAN  = "#00B4D8"
+_AMBER = "#D4840A"
+
+_BTN_MODE_ON = (
+    "QPushButton { background:#003040; color:#00E5FF; border:1px solid #00B4D8;"
+    "  border-radius:3px; padding:3px 8px; font-size:10px; font-weight:700; }"
+)
+_BTN_MODE_OFF = (
+    "QPushButton { background:#0A1420; color:#556677; border:1px solid #1A2A3A;"
+    "  border-radius:3px; padding:3px 8px; font-size:10px; }"
+    "QPushButton:hover { background:#111F2E; color:#AABBCC; border-color:#2A3A4A; }"
+)
+_BTN_OUT_ON = (
+    "QPushButton { background:#0A2800; color:#2ECC71; border:1px solid #2ECC71;"
+    "  border-radius:3px; padding:2px 8px; font-size:10px; font-weight:700; }"
+)
+_BTN_OUT_OFF = (
+    "QPushButton { background:#0A1420; color:#445566; border:1px solid #1A2A3A;"
+    "  border-radius:3px; padding:2px 8px; font-size:10px; }"
+    "QPushButton:hover { background:#111F2E; color:#AABBCC; }"
+)
+_BTN_COMPOSE = (
+    "QPushButton { background:#1565C0; color:#FFFFFF; border:none; border-radius:4px;"
+    "  padding:5px 16px; font-size:11px; font-weight:700; }"
+    "QPushButton:hover { background:#1976D2; }"
+    "QPushButton:disabled { background:#1A2A3A; color:#445566; }"
+)
+_BTN_FIT = (
+    "QPushButton { background:#2A0A3A; color:#CC88FF; border:1px solid #5A3A7A;"
+    "  border-radius:4px; padding:4px 12px; font-size:10px; font-weight:700; }"
+    "QPushButton:hover { background:#3A1A4A; }"
+    "QPushButton:disabled { background:#1A2A3A; color:#445566; }"
+)
+_SPIN = (
+    "QDoubleSpinBox { background:#0E1820; color:#CCDDEE; border:1px solid #2A3A4A;"
+    "  border-radius:3px; padding:1px 3px; font-size:10px; }"
+)
+
+
+def _sep() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.HLine)
+    f.setFixedHeight(1)
+    f.setStyleSheet("background:#1A2A3A;")
+    return f
+
+
+# ── Background worker ──────────────────────────────────────────────────────────
+
+class _FusionWorker(QThread):
+    done   = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self._fn())
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+# ── Image row ──────────────────────────────────────────────────────────────────
+
+class FusionRow(QWidget):
+    changed          = pyqtSignal()
     remove_requested = pyqtSignal(object)
 
     def __init__(self, index: int, path: str, fusion: IlluminationFusion, parent=None):
         super().__init__(parent)
-        self.index = index
+        self.index  = index
         self.fusion = fusion
         self._build(path)
 
     def _build(self, path: str):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(4)
 
-        self._label = QLabel(os.path.basename(path))
-        self._label.setFixedWidth(120)
-        self._label.setToolTip(path)
+        # Filename
+        name = QLabel(os.path.basename(path))
+        name.setFixedWidth(110)
+        name.setStyleSheet(f"color:{_TEXT}; font-size:10px;")
+        name.setToolTip(path)
+        lay.addWidget(name)
 
-        self._cb_r = QCheckBox("R")
-        self._cb_g = QCheckBox("G")
-        self._cb_b = QCheckBox("B")
+        # ── RGB controls ─────────────────────────────────────────────────
+        self._rgb_w = QWidget()
+        rgb_lay = QHBoxLayout(self._rgb_w)
+        rgb_lay.setContentsMargins(0, 0, 0, 0)
+        rgb_lay.setSpacing(3)
 
-        self._weight = QDoubleSpinBox()
-        self._weight.setRange(0.0, 2.0)
-        self._weight.setSingleStep(0.1)
-        self._weight.setValue(1.0)
-        self._weight.setFixedWidth(55)
-        self._weight.setPrefix("w:")
+        from PyQt6.QtWidgets import QCheckBox
+        self._cb_r = QCheckBox("R"); self._cb_g = QCheckBox("G"); self._cb_b = QCheckBox("B")
+        for cb, col in [(self._cb_r, "#FF5555"), (self._cb_g, "#55EE55"), (self._cb_b, "#5599FF")]:
+            cb.setStyleSheet(f"color:{col}; font-size:10px; font-weight:700;")
+            cb.stateChanged.connect(self._on_rgb)
+            rgb_lay.addWidget(cb)
 
-        btn_del = QPushButton("✕")
-        btn_del.setFixedSize(20, 20)
-        btn_del.setStyleSheet("color: #ff5252;")
-        btn_del.clicked.connect(lambda: self.remove_requested.emit(self))
+        self._w_spin = QDoubleSpinBox()
+        self._w_spin.setRange(0.0, 2.0); self._w_spin.setSingleStep(0.1)
+        self._w_spin.setValue(1.0); self._w_spin.setFixedWidth(54)
+        self._w_spin.setStyleSheet(_SPIN); self._w_spin.setPrefix("w:")
+        self._w_spin.valueChanged.connect(self._on_rgb)
+        rgb_lay.addWidget(self._w_spin)
+        lay.addWidget(self._rgb_w)
 
-        for w in [self._cb_r, self._cb_g, self._cb_b, self._weight]:
-            if hasattr(w, "stateChanged"):
-                w.stateChanged.connect(self._on_changed)
-            elif hasattr(w, "valueChanged"):
-                w.valueChanged.connect(self._on_changed)
+        # ── Angle controls ───────────────────────────────────────────────
+        self._ang_w = QWidget()
+        ang_lay = QHBoxLayout(self._ang_w)
+        ang_lay.setContentsMargins(0, 0, 0, 0)
+        ang_lay.setSpacing(3)
 
-        layout.addWidget(self._label)
-        layout.addWidget(self._cb_r)
-        layout.addWidget(self._cb_g)
-        layout.addWidget(self._cb_b)
-        layout.addWidget(self._weight)
-        layout.addWidget(btn_del)
+        for txt in ["Az:", "El:"]:
+            lbl = QLabel(txt)
+            lbl.setStyleSheet(f"color:{_DIM}; font-size:10px;")
+            ang_lay.addWidget(lbl)
+            sp  = QDoubleSpinBox()
+            sp.setRange(0, 360 if txt == "Az:" else 90)
+            sp.setSingleStep(5); sp.setValue(0 if txt == "Az:" else 45)
+            sp.setFixedWidth(58); sp.setStyleSheet(_SPIN); sp.setSuffix("°")
+            sp.valueChanged.connect(self._on_angles)
+            ang_lay.addWidget(sp)
+            if txt == "Az:": self._az_sp = sp
+            else:            self._el_sp = sp
 
-    def _on_changed(self):
+        self._ang_w.setVisible(False)
+        lay.addWidget(self._ang_w)
+
+        lay.addStretch(1)
+
+        # Delete
+        del_btn = QPushButton("✕")
+        del_btn.setFixedSize(18, 18)
+        del_btn.setStyleSheet(
+            "QPushButton{background:#1A0808;color:#AA4444;border:none;border-radius:3px;font-size:9px;}"
+            "QPushButton:hover{background:#2A1010;color:#FF6666;}"
+        )
+        del_btn.clicked.connect(lambda: self.remove_requested.emit(self))
+        lay.addWidget(del_btn)
+
+        self.setStyleSheet("background:#111A24; border-radius:3px;")
+        self.setFixedHeight(26)
+
+    def set_mode(self, mode: str):
+        angle_modes = ("Photometric Stereo", "RTI Relight")
+        self._rgb_w.setVisible(mode == "RGB Composite")
+        self._ang_w.setVisible(mode in angle_modes)
+
+    def _on_rgb(self):
         self.fusion.set_assignment(
             self.index,
-            r=self._cb_r.isChecked(),
-            g=self._cb_g.isChecked(),
-            b=self._cb_b.isChecked(),
-            weight=self._weight.value(),
+            r=self._cb_r.isChecked(), g=self._cb_g.isChecked(), b=self._cb_b.isChecked(),
+            weight=self._w_spin.value(),
         )
         self.changed.emit()
 
+    def _on_angles(self):
+        self.fusion.set_angles(self.index, self._az_sp.value(), self._el_sp.value())
+        self.changed.emit()
+
+
+# ── Main fusion panel ──────────────────────────────────────────────────────────
 
 class FusionPanel(QWidget):
     composite_ready = pyqtSignal(np.ndarray)
 
+    _MODES = ["RGB Composite", "Photometric Stereo", "RTI Relight", "Max / Min / Avg"]
+
     def __init__(self):
         super().__init__()
         self.fusion = IlluminationFusion()
-        self._rows: list[FusionInputRow] = []
+        self._rows:  list[FusionRow]   = []
+        self._worker: _FusionWorker | None = None
+        self._rti_fitted = False
         self._build()
 
+    # ── UI construction ───────────────────────────────────────────────────────
+
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-
-        # Toolbar
-        toolbar = QHBoxLayout()
-        btn_add = QPushButton("+ Add Image")
-        btn_add.clicked.connect(self._add_images)
-        btn_clear = QPushButton("Clear")
-        btn_clear.clicked.connect(self._clear)
-        btn_clear.setStyleSheet("color: #ff5252;")
-
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["RGB Composite", "Average", "Max", "Min"])
-        self._mode_combo.currentTextChanged.connect(self._compose)
-
-        btn_compose = QPushButton("Compose →")
-        btn_compose.clicked.connect(self._compose)
-        btn_compose.setStyleSheet("background: #1565C0; color: white; font-weight: bold;")
-
-        toolbar.addWidget(btn_add)
-        toolbar.addWidget(btn_clear)
-        toolbar.addStretch()
-        toolbar.addWidget(QLabel("Mode:"))
-        toolbar.addWidget(self._mode_combo)
-        toolbar.addWidget(btn_compose)
-        layout.addLayout(toolbar)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
 
         # Header
-        header = QHBoxLayout()
-        for text, w in [("Image", 120), ("R", 25), ("G", 25), ("B", 25), ("Weight", 55)]:
-            lbl = QLabel(text)
-            lbl.setFixedWidth(w)
-            lbl.setStyleSheet("color: gray; font-size: 9px;")
-            header.addWidget(lbl)
-        header.addStretch()
-        layout.addLayout(header)
+        hdr = QLabel("  ⚡  Illumination Fusion")
+        hdr.setStyleSheet(f"color:{_CYAN}; font-size:10px; font-weight:700; letter-spacing:1px;")
+        root.addWidget(hdr)
+        root.addWidget(_sep())
 
-        # Rows scroll area
+        # Mode selector
+        root.addWidget(self._make_section_label("MODE"))
+        self._mode_btns: dict[str, QPushButton] = {}
+        self._mode_group = QButtonGroup(self)
+        row1 = QHBoxLayout(); row1.setSpacing(3); row1.setContentsMargins(0,0,0,0)
+        row2 = QHBoxLayout(); row2.setSpacing(3); row2.setContentsMargins(0,0,0,0)
+        for i, m in enumerate(self._MODES):
+            btn = QPushButton(m)
+            btn.setCheckable(True)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self._mode_group.addButton(btn)
+            self._mode_btns[m] = btn
+            btn.clicked.connect(lambda _, mode=m: self._on_mode(mode))
+            (row1 if i < 2 else row2).addWidget(btn)
+        self._mode_btns[self._MODES[0]].setChecked(True)
+        self._refresh_mode_styles(self._MODES[0])
+        root.addLayout(row1)
+        root.addLayout(row2)
+        root.addWidget(_sep())
+
+        # Image list
+        img_bar = QHBoxLayout()
+        img_bar.addWidget(self._make_section_label("IMAGES"))
+        img_bar.addStretch(1)
+        for label, slot, style in [
+            ("＋ Add",  self._add_images,
+             f"QPushButton{{background:#0E2030;color:{_CYAN};border:1px solid {_CYAN};"
+             "border-radius:3px;padding:2px 8px;font-size:10px;font-weight:600;}}"
+             "QPushButton:hover{background:#0A3040;}"),
+            ("Clear", self._clear,
+             "QPushButton{background:#200A0A;color:#DD4444;border:1px solid #552222;"
+             "border-radius:3px;padding:2px 8px;font-size:10px;}"
+             "QPushButton:hover{background:#300A0A;}"),
+        ]:
+            b = QPushButton(label); b.setFixedHeight(22); b.setStyleSheet(style)
+            b.clicked.connect(slot)
+            img_bar.addWidget(b)
+        root.addLayout(img_bar)
+
+        # Column header
+        self._col_hdr = QLabel("Filename        R  G  B  Weight")
+        self._col_hdr.setStyleSheet(f"color:{_DIM}; font-size:9px; padding-left:4px;")
+        root.addWidget(self._col_hdr)
+
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
-        self._scroll_widget = QWidget()
-        self._scroll_layout = QVBoxLayout(self._scroll_widget)
-        self._scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._scroll_layout.setSpacing(2)
-        self._scroll.setWidget(self._scroll_widget)
-        self._scroll.setMaximumHeight(200)
-        layout.addWidget(self._scroll)
+        self._scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        self._sw = QWidget(); self._sw.setStyleSheet("background:transparent;")
+        self._sl = QVBoxLayout(self._sw)
+        self._sl.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._sl.setSpacing(3); self._sl.setContentsMargins(0,0,0,0)
+        self._scroll.setWidget(self._sw)
+        self._scroll.setMinimumHeight(50)
+        self._scroll.setMaximumHeight(180)
+        root.addWidget(self._scroll)
 
-        self._hint = QLabel("Load multiple images of the same scene with different lighting.\nAssign each to R / G / B channels to reveal defects.")
-        self._hint.setStyleSheet("color: gray; font-size: 9px;")
+        self._hint = QLabel(
+            "Load images captured under different\n"
+            "lighting angles to reveal surface defects."
+        )
+        self._hint.setStyleSheet(f"color:{_DIM}; font-size:9px; padding:4px;")
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._hint.setWordWrap(True)
-        layout.addWidget(self._hint)
+        root.addWidget(self._hint)
+        root.addWidget(_sep())
+
+        # Mode-specific controls
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_rgb_panel())    # 0
+        self._stack.addWidget(self._build_ps_panel())     # 1
+        self._stack.addWidget(self._build_rti_panel())    # 2
+        self._stack.addWidget(self._build_stat_panel())   # 3
+        root.addWidget(self._stack)
+
+        root.addWidget(_sep())
+
+        # Compose
+        self._compose_btn = QPushButton("▶  Compose")
+        self._compose_btn.setStyleSheet(_BTN_COMPOSE)
+        self._compose_btn.clicked.connect(self._compose)
+        root.addWidget(self._compose_btn)
+
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{_AMBER}; font-size:9px;")
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._status)
+
+        root.addStretch(1)
+
+    # ── Sub-panels ────────────────────────────────────────────────────────────
+
+    def _build_rgb_panel(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0)
+        tip = QLabel(
+            "Assign each image to R, G, or B.\n"
+            "Defects hidden in one light angle become colour-visible in the composite."
+        )
+        tip.setStyleSheet(f"color:{_DIM}; font-size:9px;"); tip.setWordWrap(True)
+        lay.addWidget(tip)
+        return w
+
+    def _build_ps_panel(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(5)
+        tip = QLabel("Set azimuth + elevation per light. Needs ≥ 3 images.")
+        tip.setStyleSheet(f"color:{_DIM}; font-size:9px;"); tip.setWordWrap(True)
+        lay.addWidget(tip)
+
+        lay.addWidget(self._make_section_label("OUTPUT"))
+        self._ps_outputs = ["Gradient Magnitude", "Normal Map", "Albedo", "Height Map"]
+        self._ps_sel = self._ps_outputs[0]
+        self._ps_group = QButtonGroup(self)
+        self._ps_btns: dict[str, QPushButton] = {}
+        r1 = QHBoxLayout(); r1.setSpacing(3); r1.setContentsMargins(0,0,0,0)
+        r2 = QHBoxLayout(); r2.setSpacing(3); r2.setContentsMargins(0,0,0,0)
+        for i, lbl in enumerate(self._ps_outputs):
+            btn = QPushButton(lbl); btn.setCheckable(True)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self._ps_group.addButton(btn); self._ps_btns[lbl] = btn
+            btn.clicked.connect(lambda _, l=lbl: self._set_ps_out(l))
+            (r1 if i < 2 else r2).addWidget(btn)
+        self._ps_btns[self._ps_outputs[0]].setChecked(True)
+        self._refresh_ps_styles(self._ps_outputs[0])
+        lay.addLayout(r1); lay.addLayout(r2)
+
+        tip2 = QLabel(
+            "Gradient Magnitude — best defect signal (scratches, pits)\n"
+            "Normal Map — surface orientation as RGB colour\n"
+            "Albedo — material reflectivity, no lighting\n"
+            "Height Map — reconstructed 3-D depth"
+        )
+        tip2.setStyleSheet(f"color:{_DIM}; font-size:9px;"); tip2.setWordWrap(True)
+        lay.addWidget(tip2)
+        return w
+
+    def _build_rti_panel(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(5)
+        tip = QLabel("Set azimuth + elevation per image. Needs ≥ 6 images.\nFit once — then drag sliders to relight in real time.")
+        tip.setStyleSheet(f"color:{_DIM}; font-size:9px;"); tip.setWordWrap(True)
+        lay.addWidget(tip)
+
+        self._rti_fit_btn = QPushButton("⚙  Fit RTI Polynomials")
+        self._rti_fit_btn.setStyleSheet(_BTN_FIT)
+        self._rti_fit_btn.clicked.connect(self._fit_rti)
+        lay.addWidget(self._rti_fit_btn)
+
+        self._rti_sliders = QWidget(); self._rti_sliders.setVisible(False)
+        sl_lay = QVBoxLayout(self._rti_sliders); sl_lay.setContentsMargins(0,0,0,0); sl_lay.setSpacing(4)
+
+        for attr, label, mn, mx, default in [
+            ("_rti_az", "Azimuth",   0, 360, 0),
+            ("_rti_el", "Elevation", 0,  90, 45),
+        ]:
+            row = QHBoxLayout(); row.setSpacing(4)
+            lbl = QLabel(label); lbl.setFixedWidth(58)
+            lbl.setStyleSheet(f"color:{_DIM}; font-size:10px;")
+            sld = QSlider(Qt.Orientation.Horizontal)
+            sld.setRange(mn, mx); sld.setValue(default)
+            val_lbl = QLabel(f"{default:3d}°")
+            val_lbl.setFixedWidth(32)
+            val_lbl.setStyleSheet(f"color:{_CYAN}; font-size:10px;")
+            sld.valueChanged.connect(lambda v, vl=val_lbl, a=attr: self._rti_slider_changed(v, vl, a))
+            setattr(self, attr + "_sld", sld)
+            setattr(self, attr + "_val", val_lbl)
+            row.addWidget(lbl); row.addWidget(sld, stretch=1); row.addWidget(val_lbl)
+            sl_lay.addLayout(row)
+
+        lay.addWidget(self._rti_sliders)
+
+        self._rti_debounce = QTimer(self)
+        self._rti_debounce.setSingleShot(True)
+        self._rti_debounce.setInterval(80)
+        self._rti_debounce.timeout.connect(self._rti_relight_now)
+        return w
+
+    def _build_stat_panel(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(5)
+        lay.addWidget(self._make_section_label("OPERATION"))
+        self._stat_sel = "Max"
+        self._stat_group = QButtonGroup(self)
+        self._stat_btns: dict[str, QPushButton] = {}
+        row = QHBoxLayout(); row.setSpacing(3); row.setContentsMargins(0,0,0,0)
+        for op in ["Max", "Min", "Average"]:
+            btn = QPushButton(op); btn.setCheckable(True)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self._stat_group.addButton(btn); self._stat_btns[op] = btn
+            btn.clicked.connect(lambda _, o=op: self._set_stat(o))
+            row.addWidget(btn)
+        self._stat_btns["Max"].setChecked(True)
+        self._refresh_stat_styles("Max")
+        lay.addLayout(row)
+        tip = QLabel(
+            "Max = brightest pixel (bright defects).\n"
+            "Min = darkest pixel (pits, shadows).\n"
+            "Average = balanced exposure blend."
+        )
+        tip.setStyleSheet(f"color:{_DIM}; font-size:9px;"); tip.setWordWrap(True)
+        lay.addWidget(tip)
+        return w
+
+    # ── Style helpers ─────────────────────────────────────────────────────────
+
+    def _make_section_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{_DIM}; font-size:9px; font-weight:700; letter-spacing:1px;")
+        return lbl
+
+    def _refresh_mode_styles(self, active: str):
+        for m, btn in self._mode_btns.items():
+            btn.setStyleSheet(_BTN_MODE_ON if m == active else _BTN_MODE_OFF)
+
+    def _refresh_ps_styles(self, active: str):
+        for lbl, btn in self._ps_btns.items():
+            btn.setStyleSheet(_BTN_OUT_ON if lbl == active else _BTN_OUT_OFF)
+
+    def _refresh_stat_styles(self, active: str):
+        for op, btn in self._stat_btns.items():
+            btn.setStyleSheet(_BTN_OUT_ON if op == active else _BTN_OUT_OFF)
+
+    # ── Mode / output switching ───────────────────────────────────────────────
+
+    def _on_mode(self, mode: str):
+        self._stack.setCurrentIndex(self._MODES.index(mode))
+        self._refresh_mode_styles(mode)
+        col = ("Filename        R  G  B  Weight" if mode == "RGB Composite"
+               else "Filename        Azimuth    Elevation" if mode in ("Photometric Stereo", "RTI Relight")
+               else "Filename")
+        self._col_hdr.setText(col)
+        for row in self._rows:
+            row.set_mode(mode)
+        if mode != "RTI Relight":
+            self._rti_fitted = False
+
+    def _set_ps_out(self, lbl: str):
+        self._ps_sel = lbl; self._refresh_ps_styles(lbl)
+
+    def _set_stat(self, op: str):
+        self._stat_sel = op; self._refresh_stat_styles(op)
+
+    # ── Image management ──────────────────────────────────────────────────────
+
+    def _current_mode(self) -> str:
+        for m, btn in self._mode_btns.items():
+            if btn.isChecked(): return m
+        return self._MODES[0]
 
     def _add_images(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select Illumination Images", "",
+            self, "Select Light Images", "",
             "Images (*.tiff *.tif *.png *.bmp *.jpg *.pgm)"
         )
+        mode = self._current_mode()
         for path in paths:
-            self._add_single(path)
+            try:
+                data = load_image(path)
+                idx  = self.fusion.add_image(data.raw, path)
+                row  = FusionRow(idx, path, self.fusion)
+                row.set_mode(mode)
+                row.changed.connect(lambda: setattr(self, "_rti_fitted", False))
+                row.remove_requested.connect(self._remove_row)
+                self._rows.append(row)
+                self._sl.addWidget(row)
+                self._hint.setVisible(False)
+                self._rti_fitted = False
+            except Exception as e:
+                self._status.setText(f"Load failed: {e}")
 
-    def _add_single(self, path: str):
-        try:
-            data = load_image(path)
-            idx = self.fusion.add_image(data.raw, path)
-            row = FusionInputRow(idx, path, self.fusion)
-            row.changed.connect(self._compose)
-            row.remove_requested.connect(self._remove_row)
-            self._rows.append(row)
-            self._scroll_layout.addWidget(row)
-        except Exception as e:
-            pass
-
-    def _remove_row(self, row: FusionInputRow):
+    def _remove_row(self, row: FusionRow):
         idx = self._rows.index(row)
         self.fusion.remove_image(idx)
         self._rows.pop(idx)
-        self._scroll_layout.removeWidget(row)
+        self._sl.removeWidget(row)
         row.deleteLater()
-        # Re-index remaining rows
-        for i, r in enumerate(self._rows):
-            r.index = i
+        for i, r in enumerate(self._rows): r.index = i
+        self._hint.setVisible(len(self._rows) == 0)
+        self._rti_fitted = False
 
     def _clear(self):
         for row in self._rows:
-            self._scroll_layout.removeWidget(row)
-            row.deleteLater()
-        self._rows.clear()
-        self.fusion.clear()
+            self._sl.removeWidget(row); row.deleteLater()
+        self._rows.clear(); self.fusion.clear()
+        self._hint.setVisible(True); self._rti_fitted = False
+        self._status.setText("")
+
+    # ── Compose ───────────────────────────────────────────────────────────────
 
     def _compose(self):
-        mode = self._mode_combo.currentText()
-        result = None
-        if mode == "RGB Composite":
-            result = self.fusion.compose()
-        elif mode == "Average":
-            result = self.fusion.average_fusion()
-        elif mode == "Max":
-            result = self.fusion.max_fusion()
-        elif mode == "Min":
-            result = self.fusion.min_fusion()
+        if not self.fusion.entries:
+            self._status.setText("No images loaded."); return
+        if self._worker and self._worker.isRunning(): return
 
+        mode = self._current_mode()
+        _ps_key = {
+            "Gradient Magnitude": "gradient",
+            "Normal Map":         "normal_map",
+            "Albedo":             "albedo",
+            "Height Map":         "height",
+        }
+        if   mode == "RGB Composite":     fn = self.fusion.rgb_composite
+        elif mode == "Photometric Stereo":
+            out = _ps_key.get(self._ps_sel, "gradient")
+            fn  = lambda: self.fusion.photometric_stereo(out)
+        elif mode == "RTI Relight":
+            az = self._rti_az_sld.value(); el = self._rti_el_sld.value()
+            fn = lambda: self.fusion.rti_relight(az, el)
+        else:
+            ops = {"Max": self.fusion.max_fusion, "Min": self.fusion.min_fusion,
+                   "Average": self.fusion.average_fusion}
+            fn  = ops.get(self._stat_sel, self.fusion.max_fusion)
+
+        self._status.setText("⏳ Processing…")
+        self._compose_btn.setEnabled(False)
+        self._worker = _FusionWorker(fn)
+        self._worker.done.connect(self._on_done)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_done(self, result):
+        self._compose_btn.setEnabled(True)
+        if result is None:
+            self._status.setText("Not enough images / channels not assigned."); return
+        self._status.setText("")
+        if isinstance(result, bool):   # rti_fit returns bool
+            return
+        out = result
+        if out.ndim == 2:
+            out = cv2.cvtColor(out, cv2.COLOR_GRAY2RGB)
+        self.composite_ready.emit(out)
+
+    def _on_failed(self, error: str):
+        self._compose_btn.setEnabled(True)
+        self._status.setText(f"Error: {error}")
+
+    # ── RTI ───────────────────────────────────────────────────────────────────
+
+    def _fit_rti(self):
+        if len(self.fusion.entries) < 6:
+            self._status.setText("RTI needs ≥ 6 images."); return
+        self._status.setText("⏳ Fitting polynomials…")
+        self._rti_fit_btn.setEnabled(False)
+        self._worker = _FusionWorker(self.fusion.rti_fit)
+        self._worker.done.connect(self._on_rti_fitted)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_rti_fitted(self, ok):
+        self._rti_fit_btn.setEnabled(True)
+        if ok:
+            self._rti_fitted = True
+            self._rti_sliders.setVisible(True)
+            self._status.setText("Fitted — drag sliders to relight.")
+        else:
+            self._status.setText("Fit failed — need ≥ 6 images.")
+
+    def _rti_slider_changed(self, value: int, val_lbl: QLabel, attr: str):
+        val_lbl.setText(f"{value:3d}°")
+        if self._rti_fitted:
+            self._rti_debounce.start()
+
+    def _rti_relight_now(self):
+        az = self._rti_az_sld.value()
+        el = self._rti_el_sld.value()
+        result = self.fusion.rti_relight(az, el)
         if result is not None:
-            self.composite_ready.emit(result)
+            out = cv2.cvtColor(result, cv2.COLOR_GRAY2RGB) if result.ndim == 2 else result
+            self.composite_ready.emit(out)
