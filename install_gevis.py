@@ -37,8 +37,20 @@ def do_install(log):
     try:
         log("Copying application files…")
         if DEST.exists():
-            shutil.rmtree(DEST)
-        shutil.copytree(SRC, DEST)
+            # Remove all files except the running setup EXE (locked by Windows)
+            for item in DEST.rglob("*"):
+                if item.is_file() and item.name.lower() != "gevis_imageviewer_setup.exe":
+                    try:
+                        item.unlink()
+                    except Exception:
+                        pass
+            for item in sorted(DEST.rglob("*"), reverse=True):
+                if item.is_dir():
+                    try:
+                        item.rmdir()
+                    except Exception:
+                        pass
+        shutil.copytree(SRC, DEST, dirs_exist_ok=True)
         log(f"  Installed to: {DEST}")
 
         log("Creating Start Menu shortcut…")
