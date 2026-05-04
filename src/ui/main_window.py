@@ -39,6 +39,7 @@ from src.ui.panels.pipeline_panel   import PipelinePanel
 from src.ui.panels.browser_panel    import BrowserPanel
 from src.ui.panels.fusion_panel     import FusionPanel
 from src.ui.panels.surface_3d_panel import Surface3DPanel
+from src.ui.help_dialog             import HelpDialog
 from src.ui.panels.comparison_panel import ComparisonPanel
 from src.ui.panels.multi_viewer     import MultiViewer
 from src.ui.theme import VERDICT_COLOR, COLOR_PERFECT, COLOR_WARN, COLOR_FAIL
@@ -767,6 +768,14 @@ class MainWindow(QMainWindow):
         self._action(m, "Set Scale Calibration (mm/px)…", self._set_scale_calibration)
         self._action(m, "Clear Inspect Overlays",          self._clear_inspect_overlays)
         self._action(m, "Clear Mask",                      self._mask_clear)
+
+        # ── Help ───────────────────────────────────────────────────
+        m = mb.addMenu("&Help")
+        self._action(m, "User Guide", self._open_help, "F1")
+
+    def _open_help(self):
+        dlg = HelpDialog(self)
+        dlg.exec()
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
         a = QAction(label, self)
