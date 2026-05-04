@@ -40,6 +40,7 @@ from src.ui.panels.browser_panel    import BrowserPanel
 from src.ui.panels.fusion_panel     import FusionPanel
 from src.ui.panels.surface_3d_panel import Surface3DPanel
 from src.ui.help_dialog             import HelpDialog
+from src.ui.converter_dialog        import ConverterDialog
 from src.ui.panels.comparison_panel import ComparisonPanel
 from src.ui.panels.multi_viewer     import MultiViewer
 from src.ui.theme import VERDICT_COLOR, COLOR_PERFECT, COLOR_WARN, COLOR_FAIL
@@ -692,6 +693,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._action(m, "Batch Analyze Folder…",         self._batch_analyze, "Ctrl+B")
         m.addSeparator()
+        self._action(m, "Image Converter…", self._open_converter)
+        m.addSeparator()
         self._action(m, "Exit",            self.close,             "Alt+F4")
 
         # ── View ───────────────────────────────────────────────────
@@ -775,6 +778,11 @@ class MainWindow(QMainWindow):
 
     def _open_help(self):
         dlg = HelpDialog(self)
+        dlg.exec()
+
+    def _open_converter(self):
+        current = self.current_image.path if self.current_image and self.current_image.path else ""
+        dlg = ConverterDialog(current_path=current, parent=self)
         dlg.exec()
 
     def _action(self, menu: QMenu, label: str, slot, shortcut: str = "") -> QAction:
