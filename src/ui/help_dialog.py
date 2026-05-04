@@ -1128,12 +1128,139 @@ the app automatically switches to the 3D tab and loads real surface geometry.</p
 
 
 # ══════════════════════════════════════════════════════════════════════════
-"Inspector Panel": _page("Inspector Panel", """
-<p>The Inspector dock (left side) shows analysis results for the current image and active tool.</p>
+"Inspector Panel": _page("Inspector Panel — All Metrics Explained", """
+<p>The Inspector dock shows objective numerical measurements of the image.
+No PASS/FAIL verdicts — the expert reads the numbers and decides.</p>
+
+<hr>
+<h2>Focus &amp; Sharpness</h2>
+<p>Three independent sharpness algorithms run on every image and are fused into one score.</p>
+
+<h3>Score (0–1000+)</h3>
+<p>Composite sharpness index. Higher = sharper. No threshold verdict — read the raw number.</p>
+
+<h3>Lap (Laplacian Variance)</h3>
+<p class="ref">Brenner et al. (1976) — first published focus measure for autofocus systems</p>
+<div class="math">
+Lap = Var( ∇²I )  =  Var( I[x] − 2·I[x+1] + I[x+2] )
+
+∇²I = second derivative (Laplacian) of the image
+Var = variance across all pixels in the cell
+</div>
+<p>A perfectly sharp image has strong, high-contrast edges → large second derivatives → high Lap variance.
+A blurry image has smooth gradients → small second derivatives → low Lap variance.
+<strong>Best in low-noise conditions. Very fast.</strong></p>
+
+<h3>Ten (Tenengrad)</h3>
+<p class="ref">Tenenbaum (1970) — autofocus criterion; revalidated IEEE Trans. Circuits Syst. (2013)</p>
+<div class="math">
+Ten = Σ max( Gx(x,y)² + Gy(x,y)² − threshold,  0 )
+
+Gx, Gy = Sobel gradient (first derivative) in X and Y directions
+threshold = noise floor — only gradients above this are counted
+</div>
+<p>Sums squared gradient magnitude across the image cell.
+The noise threshold makes Tenengrad far more robust than Lap on real camera images with sensor noise.
+<strong>Best all-round metric — recommended for production.</strong></p>
+
+<h3>Bren (Brenner)</h3>
+<p class="ref">Brenner et al. (1976) — fastest focus measure, still used in embedded systems</p>
+<div class="math">
+Bren = Σ ( I[x+2,y] − I[x,y] )²    (sum of squared 2-pixel differences)
+</div>
+<p>Measures local contrast by comparing pixels 2 steps apart.
+Fastest computation of the three. Good correlation with perceived sharpness.
+Used as a cross-check — if Bren and Ten agree, confidence is HIGH.</p>
+
+<h3>Confidence (HIGH / MEDIUM / LOW)</h3>
+<ul>
+  <li><strong>HIGH</strong> — all three metrics agree on the same sharpness category</li>
+  <li><strong>MEDIUM</strong> — two agree, one disagrees by one level</li>
+  <li><strong>LOW</strong> — metrics disagree significantly (unusual texture, high noise, or damaged sensor)</li>
+</ul>
+
+<h3>Scoring mode</h3>
+<table>
+  <tr><th>Mode</th><th>Meaning</th></tr>
+  <tr><td>RELATIVE</td><td>Score relative to the sharpest cell in the same image. Cannot confirm absolute sharpness.</td></tr>
+  <tr><td>AUTO-REF</td><td>Score relative to the sharpest image seen this session.</td></tr>
+  <tr><td>LOCKED REF ✓</td><td>Score relative to a locked known-good reference. Most reliable — use in production.</td></tr>
+</table>
+
+<hr>
+<h2>Image Quality Metrics</h2>
+<p>All metrics are objective measurements. The expert interprets them — no automatic verdict.</p>
+
+<h3>Brightness  (mean pixel value, 0–255)</h3>
+<div class="math">
+Brightness = mean( gray(x,y) )  over all valid pixels
+
+gray = 0.299·R + 0.587·G + 0.114·B   (ITU-R BT.601 luminance)
+</div>
+<table>
+  <tr><th>Value</th><th>Label</th><th>Meaning</th></tr>
+  <tr><td>&lt; 30 / 255</td><td>DARK</td><td>Image too dark — defects in shadow regions invisible. Fix lighting or exposure.</td></tr>
+  <tr><td>30–80 / 255</td><td>LOW</td><td>Underlit — may miss low-contrast defects. Increase illumination.</td></tr>
+  <tr><td>&gt; 80 / 255</td><td>OK</td><td>Sufficient brightness for inspection.</td></tr>
+</table>
+
+<h3>Exposure</h3>
+<div class="math">
+Overexposed  = pixels where gray ≥ 250  (saturated — no information)
+Underexposed = pixels where gray ≤ 5    (crushed — no information)
+OK = both percentages &lt; 1% of total pixels
+</div>
+<p>Clipped pixels contain no information — defects in those regions cannot be detected.
+If overexposed: reduce light intensity or camera gain.
+If underexposed: increase light or exposure time.</p>
+
+<h3>Contrast  (RMS Contrast %)</h3>
+<p class="ref">Michelson (1927) — contrast definition; RMS contrast standard in machine vision</p>
+<div class="math">
+RMS Contrast = std(gray) / 255 × 100   (%)
+
+Also computed: Michelson = (max − min) / (max + min)
+Dynamic Range = log₂(max / min)  in stops
+</div>
+<p>RMS contrast measures the spread of intensity values.
+Low contrast (&lt;5%) means the image is flat — defects have similar brightness to background, hard to detect.
+Increase lighting angle or use CLAHE filter to improve contrast before inspection.</p>
+
+<h3>Noise</h3>
+<p class="ref">Laplacian noise estimator — Immerkær (1996), fast and accurate without requiring flat regions</p>
+<div class="math">
+Kernel K = [ 1  −2   1 ]
+           [−2   4  −2 ]
+           [ 1  −2   1 ]
+
+filtered = K * image
+Noise = sqrt( mean(filtered²) ) / 2
+</div>
+<p>The Laplacian kernel removes signal and leaves only noise.
+Low noise (&lt;5) = clean sensor, good for fine defect detection.
+High noise (&gt;20) = noisy sensor or high ISO — apply NL-Means or Bilateral filter first.</p>
+
+<h3>SNR  (Signal-to-Noise Ratio, dB)</h3>
+<div class="math">
+SNR = 20 · log₁₀( mean_brightness / noise_level )   dB
+
+Higher dB = cleaner image.
+Every +6 dB = noise halved relative to signal.
+</div>
+<table>
+  <tr><th>SNR</th><th>Quality</th></tr>
+  <tr><td>&gt; 40 dB</td><td>Excellent — fine defect detection reliable</td></tr>
+  <tr><td>30–40 dB</td><td>Good — suitable for most inspection tasks</td></tr>
+  <tr><td>20–30 dB</td><td>Marginal — use denoising filter before detection</td></tr>
+  <tr><td>&lt; 20 dB</td><td>Poor — noise dominates, false detections likely</td></tr>
+</table>
+
+<hr>
+<h2>Other Inspector sections</h2>
 <table>
   <tr><th>Section</th><th>What it shows</th><th>When</th></tr>
-  <tr><td>Pixel</td><td>R, G, B (or grayscale) value under mouse cursor</td><td>Always</td></tr>
   <tr><td>Histogram</td><td>Intensity distribution — full image or ROI</td><td>Always</td></tr>
+  <tr><td>Pixel</td><td>R, G, B values under mouse cursor</td><td>Always</td></tr>
   <tr><td>ROI Stats</td><td>Mean, min, max, std-dev for drawn rectangle</td><td>After drawing ROI</td></tr>
   <tr><td>Line Profile</td><td>Brightness chart along drawn line</td><td>After drawing profile</td></tr>
   <tr><td>Measurement</td><td>Distance in px and mm, angle, coordinates</td><td>After measuring</td></tr>

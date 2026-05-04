@@ -168,12 +168,9 @@ class InspectorPanel(QScrollArea):
         box = CollapsibleSection("Focus & Sharpness", expanded=True)
 
         top_row = QHBoxLayout()
-        self._focus_verdict = QLabel("—")
-        self._focus_verdict.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         self._focus_confidence = QLabel("")
         self._focus_confidence.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self._focus_confidence.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        top_row.addWidget(self._focus_verdict)
         top_row.addStretch()
         top_row.addWidget(self._focus_confidence)
         box.addLayout(top_row)
@@ -199,8 +196,6 @@ class InspectorPanel(QScrollArea):
         conf_color = {"HIGH": "#00e676", "MEDIUM": "#ffab40", "LOW": "#888899"}
 
         color = color_map.get(result.verdict, "white")
-        self._focus_verdict.setText(result.verdict)
-        self._focus_verdict.setStyleSheet(f"color: {color}; font-weight: bold;")
 
         conf  = getattr(result, "confidence",   "LOW")
         mode  = getattr(result, "scoring_mode", "RELATIVE")
@@ -259,29 +254,34 @@ class InspectorPanel(QScrollArea):
     def _build_quality_group(self):
         box = CollapsibleSection("Image Quality", expanded=True)
 
-        self._quality_verdict = QLabel("—")
-        self._quality_verdict.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._quality_verdict.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        box.addWidget(self._quality_verdict)
-
-        self._quality_score_row = MetricRow("Overall")
+        self._brightness_row    = MetricRow("Brightness")
         self._exposure_row      = MetricRow("Exposure")
         self._contrast_row      = MetricRow("Contrast")
         self._noise_row         = MetricRow("Noise")
         self._snr_row           = MetricRow("SNR")
 
-        for row in [self._quality_score_row, self._exposure_row,
+        for row in [self._brightness_row, self._exposure_row,
                     self._contrast_row, self._noise_row, self._snr_row]:
             box.addWidget(row)
 
         self._layout.addWidget(box)
 
     def update_quality(self, result):
-        color = "#00e676" if result.verdict == "PASS" else "#ff5252"
-        self._quality_verdict.setText(result.verdict)
-        self._quality_verdict.setStyleSheet(f"color: {color}; font-weight: bold;")
-        self._quality_score_row.set_value(f"{result.overall_score:.0f}/100", result.overall_score, color)
+        # Brightness
+        b = result.mean_brightness
+        if b < 30:
+            b_label = "DARK"
+            b_color = "#ff5252"
+        elif b < 80:
+            b_label = "LOW"
+            b_color = "#ffab40"
+        else:
+            b_label = "OK"
+            b_color = "#00e676"
+        b_pct = min(b / 255 * 100, 100)
+        self._brightness_row.set_value(f"{b:.0f}/255  {b_label}", b_pct, b_color)
 
+        # Exposure
         exp_ok = result.exposure_ok
         exp_color = "#00e676" if exp_ok else "#ff5252"
         exp_text = "OK" if exp_ok else f"Over:{result.overexposed_pct:.1f}% Under:{result.underexposed_pct:.1f}%"
