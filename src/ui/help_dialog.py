@@ -1134,57 +1134,97 @@ No PASS/FAIL verdicts — the expert reads the numbers and decides.</p>
 
 <hr>
 <h2>Focus &amp; Sharpness</h2>
-<p>Three independent sharpness algorithms run on every image and are fused into one score.</p>
+<p>Three independent sharpness measures are computed per image cell (8×8 grid).
+The panel shows the <strong>Score</strong> (composite index) and the three raw values:
+<code>Lap</code>, <code>Ten</code>, <code>Bren</code>.</p>
 
-<h3>Score (0–1000+)</h3>
-<p>Composite sharpness index. Higher = sharper. No threshold verdict — read the raw number.</p>
-
-<h3>Lap (Laplacian Variance)</h3>
-<p class="ref">Brenner et al. (1976) — first published focus measure for autofocus systems</p>
+<h3>How Score is calculated from Lap, Ten, Bren</h3>
 <div class="math">
-Lap = Var( ∇²I )  =  Var( I[x] − 2·I[x+1] + I[x+2] )
+Each raw metric is normalised against the reference value for that metric:
 
-∇²I = second derivative (Laplacian) of the image
-Var = variance across all pixels in the cell
+  Lap_norm  = Lap_value  / Lap_ref   × 100
+  Ten_norm  = Ten_value  / Ten_ref   × 100
+  Bren_norm = Bren_value / Bren_ref  × 100
+
+  Score = ( Lap_norm + Ten_norm + Bren_norm ) / 3
+
+Lap_ref, Ten_ref, Bren_ref = values from the locked reference image
+(or best cell in the same image in RELATIVE mode)
+
+Score = 100  means this image is exactly as sharp as the reference.
+Score &gt; 100 means sharper than reference.
+Score &lt; 100 means softer than reference.
+Score is unbounded — no artificial ceiling.
 </div>
-<p>A perfectly sharp image has strong, high-contrast edges → large second derivatives → high Lap variance.
-A blurry image has smooth gradients → small second derivatives → low Lap variance.
-<strong>Best in low-noise conditions. Very fast.</strong></p>
+<p>The Score is a <strong>relative index</strong>, not an absolute threshold.
+The expert compares Score across images captured under the same conditions.
+A consistent Score drop signals a focus shift, contamination, or lens change.</p>
 
-<h3>Ten (Tenengrad)</h3>
-<p class="ref">Tenenbaum (1970) — autofocus criterion; revalidated IEEE Trans. Circuits Syst. (2013)</p>
+<hr>
+<h3>Lap — Laplacian Variance</h3>
+<p class="ref">Brenner et al. (1976) — first published focus measure; widely used in autofocus systems</p>
 <div class="math">
-Ten = Σ max( Gx(x,y)² + Gy(x,y)² − threshold,  0 )
+∇²I(x,y) = I[x−1,y] − 2·I[x,y] + I[x+1,y]    (discrete Laplacian, horizontal)
 
-Gx, Gy = Sobel gradient (first derivative) in X and Y directions
-threshold = noise floor — only gradients above this are counted
+Lap = Var( ∇²I )  =  (1/N) · Σ ( ∇²I(x,y) − mean(∇²I) )²
+
+Physical meaning:
+  ∇²I is the second spatial derivative — measures rate of change of gradient.
+  At a sharp edge: I changes abruptly → ∇²I is large → high variance.
+  In a blurry image: I changes slowly → ∇²I is small → low variance.
 </div>
-<p>Sums squared gradient magnitude across the image cell.
-The noise threshold makes Tenengrad far more robust than Lap on real camera images with sensor noise.
-<strong>Best all-round metric — recommended for production.</strong></p>
+<p><strong>Sensitive to:</strong> any spatial frequency edge. Responds strongly to fine texture.<br>
+<strong>Limitation:</strong> also responds to sensor noise (noise = high-frequency signal → inflates Lap on noisy cameras).<br>
+<strong>Use when:</strong> sensor noise is low (cooled industrial cameras, low ISO).</p>
 
-<h3>Bren (Brenner)</h3>
-<p class="ref">Brenner et al. (1976) — fastest focus measure, still used in embedded systems</p>
+<hr>
+<h3>Ten — Tenengrad</h3>
+<p class="ref">Tenenbaum (1970); revalidated and ranked #1 in IEEE Trans. Circuits Syst. Video Technol. (2013) for industrial autofocus</p>
 <div class="math">
-Bren = Σ ( I[x+2,y] − I[x,y] )²    (sum of squared 2-pixel differences)
+Gx(x,y) = Sobel_x * I    (horizontal gradient, 3×3 Sobel kernel)
+Gy(x,y) = Sobel_y * I    (vertical gradient)
+
+G(x,y)  = sqrt( Gx² + Gy² )    (gradient magnitude at each pixel)
+
+Ten = Σ max( G(x,y)² − T,  0 )    where T = noise threshold
+
+Physical meaning:
+  G(x,y) is the first spatial derivative — measures local contrast (edge strength).
+  Squaring amplifies strong edges and suppresses weak ones.
+  The threshold T eliminates gradients below the camera noise floor.
+  Only real edges (above noise) contribute to Ten.
 </div>
-<p>Measures local contrast by comparing pixels 2 steps apart.
-Fastest computation of the three. Good correlation with perceived sharpness.
-Used as a cross-check — if Bren and Ten agree, confidence is HIGH.</p>
+<p><strong>Advantage over Lap:</strong> the noise threshold T makes Ten noise-robust — camera noise
+produces gradients below T and is excluded from the sum.<br>
+<strong>Most reliable metric</strong> for real industrial cameras with moderate sensor noise.<br>
+<strong>Use when:</strong> camera has visible noise, or images are taken at high gain.</p>
 
-<h3>Confidence (HIGH / MEDIUM / LOW)</h3>
-<ul>
-  <li><strong>HIGH</strong> — all three metrics agree on the same sharpness category</li>
-  <li><strong>MEDIUM</strong> — two agree, one disagrees by one level</li>
-  <li><strong>LOW</strong> — metrics disagree significantly (unusual texture, high noise, or damaged sensor)</li>
-</ul>
+<hr>
+<h3>Bren — Brenner Gradient</h3>
+<p class="ref">Brenner et al. (1976) — simplest and fastest focus measure, still standard in embedded vision</p>
+<div class="math">
+Bren = Σ ( I[x+2, y] − I[x, y] )²    (sum over all pixels)
 
-<h3>Scoring mode</h3>
+Physical meaning:
+  Compares each pixel to its neighbor 2 steps away.
+  A sharp edge causes a large 2-pixel difference → large contribution.
+  A blurry edge causes a small 2-pixel difference → small contribution.
+  Equivalent to a coarse first derivative with step size 2.
+</div>
+<p><strong>Advantage:</strong> extremely fast — one subtraction and one square per pixel, no convolution.<br>
+<strong>Limitation:</strong> less sensitive to fine texture than Lap or Ten (2-pixel step misses 1-pixel features).<br>
+<strong>Use as:</strong> cross-check — if Bren and Ten agree, the focus reading is reliable.
+If Bren is high but Lap is low, the image has coarse features but no fine detail (coarse focus only).</p>
+
+<hr>
+<h3>Reading the three numbers together</h3>
 <table>
-  <tr><th>Mode</th><th>Meaning</th></tr>
-  <tr><td>RELATIVE</td><td>Score relative to the sharpest cell in the same image. Cannot confirm absolute sharpness.</td></tr>
-  <tr><td>AUTO-REF</td><td>Score relative to the sharpest image seen this session.</td></tr>
-  <tr><td>LOCKED REF ✓</td><td>Score relative to a locked known-good reference. Most reliable — use in production.</td></tr>
+  <tr><th>Situation</th><th>Lap</th><th>Ten</th><th>Bren</th><th>Meaning</th></tr>
+  <tr><td>Perfectly sharp</td><td>HIGH</td><td>HIGH</td><td>HIGH</td><td>All edges crisp — ideal for inspection</td></tr>
+  <tr><td>Blurry</td><td>LOW</td><td>LOW</td><td>LOW</td><td>Out of focus or motion blur</td></tr>
+  <tr><td>Noisy camera</td><td>HIGH</td><td>LOW</td><td>MEDIUM</td><td>Noise inflates Lap — Ten is the reliable number</td></tr>
+  <tr><td>Coarse focus only</td><td>LOW</td><td>MEDIUM</td><td>HIGH</td><td>Large features sharp, fine detail lost</td></tr>
+  <tr><td>Defocused + noisy</td><td>MEDIUM</td><td>LOW</td><td>LOW</td><td>Noise + blur — image unusable for inspection</td></tr>
 </table>
 
 <hr>
