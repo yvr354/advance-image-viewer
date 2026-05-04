@@ -710,10 +710,10 @@ class ComparisonPanel(QWidget):
         self._btn_b.setStyleSheet(_S)
         self._btn_b.clicked.connect(lambda: self._browse("B"))
 
-        swap = QPushButton("⇄  Swap A↔B")
-        swap.setStyleSheet(_S)
-        swap.setToolTip("Swap reference and test images")
-        swap.clicked.connect(self._swap)
+        self._swap_btn = QPushButton("⇄  Swap A↔B")
+        self._swap_btn.setStyleSheet(_S)
+        self._swap_btn.setToolTip("Swap reference and test images")
+        self._swap_btn.clicked.connect(self._swap)
 
         self._active_lbl = QLabel("Active: A")
         self._active_lbl.setStyleSheet(
@@ -723,7 +723,7 @@ class ComparisonPanel(QWidget):
         lay.addWidget(self._btn_a)
         lay.addWidget(self._btn_b)
         lay.addSpacing(8)
-        lay.addWidget(swap)
+        lay.addWidget(self._swap_btn)
         lay.addStretch()
         lay.addWidget(self._active_lbl)
         return bar
@@ -751,6 +751,12 @@ class ComparisonPanel(QWidget):
         # Mode
         mode_lbl = QLabel("Mode:")
         mode_lbl.setStyleSheet(_LBL)
+        mode_lbl.setToolTip(
+            "Diff Map    — absolute difference, hot colormap\n"
+            "Signed ±128 — A−B centered at 128 gray; blue=darker, red=brighter\n"
+            "Blend       — 50% A + 50% B overlay\n"
+            "Flicker     — alternates A and B every 600 ms"
+        )
         self._mode = QComboBox()
         self._mode.addItems(["Diff Map", "Signed ±128", "Blend 50/50", "Flicker"])
         self._mode.setFixedWidth(115)
@@ -771,6 +777,12 @@ class ComparisonPanel(QWidget):
         # Threshold
         thr_lbl = QLabel("Threshold:")
         thr_lbl.setStyleSheet(_LBL)
+        thr_lbl.setToolTip(
+            "Sensitivity — pixel difference above this value counts as 'different'.\n"
+            "Lower = more sensitive (more noise detected too).\n"
+            "Higher = less sensitive (only strong differences flagged).\n"
+            "Typical production range: 20–50."
+        )
         self._thr_slider = _slider(1, 128, 30)
         self._thr_slider.setToolTip(
             "Sensitivity — pixel difference above this value counts as 'different'.\n"
@@ -787,6 +799,11 @@ class ComparisonPanel(QWidget):
         # Min area
         ma_lbl = QLabel("Min area:")
         ma_lbl.setStyleSheet(_LBL)
+        ma_lbl.setToolTip(
+            "Minimum blob size in pixels to count as a defect.\n"
+            "Blobs smaller than this are treated as noise and ignored.\n"
+            "Typical: 10–50 px. Increase to filter out more noise."
+        )
         self._ma_slider = _slider(1, 500, 25)
         self._ma_slider.setToolTip(
             "Minimum blob size in pixels to count as a defect.\n"
@@ -802,6 +819,11 @@ class ComparisonPanel(QWidget):
         # Amplify
         amp_lbl = QLabel("Amplify:")
         amp_lbl.setStyleSheet(_LBL)
+        amp_lbl.setToolTip(
+            "Boost subtle pixel differences so they are visible in the diff map.\n"
+            "1× = raw values   ·   20× = maximum boost\n"
+            "Does NOT affect detection threshold — only the visual display."
+        )
         self._amp_slider = _slider(1, 20, 4, 70)
         self._amp_slider.setToolTip(
             "Boost subtle pixel differences so they are visible in the diff map.\n"
@@ -850,6 +872,17 @@ class ComparisonPanel(QWidget):
         self._verdict_lbl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:11px; font-weight:700;")
         self._verdict_lbl.setText("Load both images to begin")
         self._metrics_lbl.setText("")
+
+    def _set_analysing(self):
+        self._verdict_bar.setStyleSheet("background:#0D1020; border-bottom:1px solid #334466;")
+        self._verdict_lbl.setStyleSheet("color:#4488BB; font-size:11px; font-weight:700;")
+        self._verdict_lbl.setText("⟳  Analysing…")
+        self._metrics_lbl.setText("")
+
+    def _set_controls_enabled(self, enabled: bool):
+        for w in [self._btn_a, self._btn_b, self._swap_btn,
+                  self._mode, self._thr_slider, self._ma_slider, self._amp_slider]:
+            w.setEnabled(enabled)
 
     def _set_verdict(self, verdict: str, metrics: dict, defects: list):
         is_pass = verdict == "PASS"
@@ -986,7 +1019,9 @@ class ComparisonPanel(QWidget):
         """Called on every slider/mode change — debounced to avoid flooding."""
         if self._mode.currentText() == "Flicker":
             return
-        self._debounce.start()   # resets the 300 ms countdown each call
+        if self._img_a is not None and self._img_b is not None:
+            self._set_analysing()   # instant feedback — user sees it the moment they touch anything
+        self._debounce.start()      # resets the 300 ms countdown each call
 
     def _run_analysis(self):
         """Actually start the worker — called 300 ms after last _trigger()."""
@@ -1009,9 +1044,11 @@ class ComparisonPanel(QWidget):
             amp=self._amp_slider.value(),
         )
         self._worker.done.connect(self._on_done)
+        self._set_controls_enabled(False)
         self._worker.start()
 
     def _on_done(self, display_img, annot_rgb, metrics: dict, defects: list):
+        self._set_controls_enabled(True)
         mode = self._mode.currentText()
         self._diff_viewer.set_image(annot_rgb)
 
