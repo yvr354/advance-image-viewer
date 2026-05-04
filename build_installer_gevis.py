@@ -19,10 +19,11 @@ APP_DIR  = ROOT / "dist" / "Gevis_ImageViewer"
 ICON     = ROOT / "resources" / "icons" / "logo_gevis.ico"
 LOGO_PNG = ROOT / "resources" / "icons" / "logo_gevis.png"
 
-# Tcl/Tk DLLs — required for tkinter installer UI
+# System DLLs required by the installer UI (tkinter + ctypes)
 _TCL_BIN = Path(r"C:\ProgramData\anaconda3\Library\bin")
 TK_DLL   = _TCL_BIN / "tk86t.dll"
 TCL_DLL  = _TCL_BIN / "tcl86t.dll"
+FFI_DLL  = _TCL_BIN / "ffi.dll"
 
 print("=" * 60)
 print("  Gevis Image Viewer — Building Installer EXE")
@@ -54,11 +55,13 @@ cmd = [
     "--hidden-import", "PIL.ImageTk",
 ]
 
-# Bundle Tcl/Tk DLLs so tkinter works on any machine
+# Bundle DLLs so tkinter + ctypes work on any machine
 if TK_DLL.exists():
     cmd += ["--add-binary", f"{TK_DLL};."]
 if TCL_DLL.exists():
     cmd += ["--add-binary", f"{TCL_DLL};."]
+if FFI_DLL.exists():
+    cmd += ["--add-binary", f"{FFI_DLL};."]
 
 cmd += ["install_gevis.py"]
 

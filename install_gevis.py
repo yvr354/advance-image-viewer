@@ -70,8 +70,11 @@ def do_install(log):
         _reg(key, "NoModify",        "1")
         _reg(key, "NoRepair",        "1")
 
-        import ctypes
-        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+        try:
+            import ctypes
+            ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+        except Exception:
+            pass  # shell refresh optional — install already complete
 
         log("")
         log("✓  Installation complete!")
