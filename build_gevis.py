@@ -6,9 +6,14 @@ Run with: venv\Scripts\python build_gevis.py
 import subprocess
 import sys
 import os
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
+
+# DLLs that PyInstaller misses from Anaconda environments
+_BIN = Path(r"C:\ProgramData\anaconda3\Library\bin")
+_DLLS = ["ffi.dll", "tk86t.dll", "tcl86t.dll"]
 
 print("=" * 60)
 print("  Gevis Image Viewer — Building EXE")
@@ -39,8 +44,15 @@ cmd = [
     "--copy-metadata", "tifffile",
     "--collect-all", "pyqtgraph",
     "--collect-all", "OpenGL",
-    "main.py",
 ]
+
+# Bundle missing DLLs
+for dll in _DLLS:
+    p = _BIN / dll
+    if p.exists():
+        cmd += ["--add-binary", f"{p};."]
+
+cmd += ["main.py"]
 
 print("\nRunning PyInstaller...\n")
 result = subprocess.run(cmd, cwd=ROOT)
