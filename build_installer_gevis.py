@@ -19,6 +19,11 @@ APP_DIR  = ROOT / "dist" / "Gevis_ImageViewer"
 ICON     = ROOT / "resources" / "icons" / "logo_gevis.ico"
 LOGO_PNG = ROOT / "resources" / "icons" / "logo_gevis.png"
 
+# Tcl/Tk DLLs — required for tkinter installer UI
+_TCL_BIN = Path(r"C:\ProgramData\anaconda3\Library\bin")
+TK_DLL   = _TCL_BIN / "tk86t.dll"
+TCL_DLL  = _TCL_BIN / "tcl86t.dll"
+
 print("=" * 60)
 print("  Gevis Image Viewer — Building Installer EXE")
 print("=" * 60)
@@ -47,8 +52,15 @@ cmd = [
     "--hidden-import", "PIL",
     "--hidden-import", "PIL.Image",
     "--hidden-import", "PIL.ImageTk",
-    "install_gevis.py",
 ]
+
+# Bundle Tcl/Tk DLLs so tkinter works on any machine
+if TK_DLL.exists():
+    cmd += ["--add-binary", f"{TK_DLL};."]
+if TCL_DLL.exists():
+    cmd += ["--add-binary", f"{TCL_DLL};."]
+
+cmd += ["install_gevis.py"]
 
 print("Running PyInstaller (this takes 1-3 minutes — app is large)...\n")
 result = subprocess.run(cmd, cwd=ROOT)
@@ -62,7 +74,7 @@ if result.returncode == 0:
     print(f"  Size : {size_mb:.0f} MB")
     print("=" * 60)
     print("\n  Give this single EXE to anyone.")
-    print("  Double-click → splash screen → Install → Done.")
+    print("  Double-click > splash screen > Install > Done.")
 else:
     print("\n" + "=" * 60)
     print("  BUILD FAILED — check errors above")
