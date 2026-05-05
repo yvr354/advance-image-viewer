@@ -2143,9 +2143,10 @@ class MainWindow(QMainWindow):
         else:
             x = self.config.window_x
             y = self.config.window_y
-            # Guard: make sure it's still on a visible screen
+            # Guard: title bar top must be visible — check top-left corner, not center
+            TITLE_BAR = 40   # minimum pixels of top edge that must be on screen
             visible = any(
-                s.availableGeometry().contains(x + w // 2, y + h // 2)
+                s.availableGeometry().contains(x + w // 2, y + TITLE_BAR)
                 for s in QApplication.screens()
             )
             if not visible:
