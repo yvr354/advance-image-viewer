@@ -106,7 +106,7 @@ class _Signals(QObject):
 
 def _output_name(src_path: Path, ext: str, quality: int) -> Path:
     stem = src_path.stem
-    if quality < 100:
+    if ext in ("jpg", "jpeg"):
         stem = f"{stem}_{quality}"
     return src_path.with_name(stem + "." + ext)
 
@@ -119,8 +119,7 @@ def _convert_one(src: Path, out: Path, ext: str, quality: int) -> str | None:
         if ext in ("jpg", "jpeg"):
             params = [cv2.IMWRITE_JPEG_QUALITY, quality]
         elif ext == "png":
-            compress = max(0, min(9, (100 - quality) // 11))
-            params = [cv2.IMWRITE_PNG_COMPRESSION, compress]
+            params = [cv2.IMWRITE_PNG_COMPRESSION, 9]
         else:
             params = []
         ok = cv2.imwrite(str(out), img, params)
@@ -182,8 +181,7 @@ class ConverterDialog(QDialog):
         root.addLayout(fq)
 
         # Quality note
-        self._quality_note = _label(
-            "Quality only applies to JPG. PNG uses lossless compression.", dim=True)
+        self._quality_note = _label("", dim=True)
         root.addWidget(self._quality_note)
         self._on_format_change()
 
@@ -279,10 +277,17 @@ class ConverterDialog(QDialog):
 
     def _on_format_change(self):
         label = self._fmt_combo.currentText()
-        _, has_quality = FORMATS[label]
+        ext, has_quality = FORMATS[label]
         self._quality_spin.setEnabled(has_quality)
         self._quality_label.setStyleSheet(
             f"color:{_TEXT};" if has_quality else f"color:{_DIM};")
+        if ext == "jpg":
+            note = "JPG — lossy. Lower % = smaller file, more artefacts. 80% recommended for inspection."
+        elif ext == "png":
+            note = "PNG — always lossless, always maximum compression. No quality setting needed."
+        else:
+            note = "Lossless format — quality setting not used, file saved as-is."
+        self._quality_note.setText(note)
 
     # ── Browse helpers ─────────────────────────────────────────────────────
 
