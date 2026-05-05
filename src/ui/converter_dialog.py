@@ -197,10 +197,10 @@ class ConverterDialog(QDialog):
         if self._current_path:
             self._single_src.setText(self._current_path)
         sf_row.addWidget(self._single_src)
-        btn_sf = _btn("Browse…")
-        btn_sf.setFixedWidth(80)
-        btn_sf.clicked.connect(self._browse_single)
-        sf_row.addWidget(btn_sf)
+        self._btn_sf = _btn("Browse…")
+        self._btn_sf.setFixedWidth(80)
+        self._btn_sf.clicked.connect(self._browse_single)
+        sf_row.addWidget(self._btn_sf)
         root.addLayout(sf_row)
 
         so_row = QHBoxLayout()
@@ -208,10 +208,10 @@ class ConverterDialog(QDialog):
         self._single_out = QLineEdit()
         self._single_out.setPlaceholderText("Output folder (same as source if empty)…")
         so_row.addWidget(self._single_out)
-        btn_so = _btn("Browse…")
-        btn_so.setFixedWidth(80)
-        btn_so.clicked.connect(self._browse_single_out)
-        so_row.addWidget(btn_so)
+        self._btn_so = _btn("Browse…")
+        self._btn_so.setFixedWidth(80)
+        self._btn_so.clicked.connect(self._browse_single_out)
+        so_row.addWidget(self._btn_so)
         root.addLayout(so_row)
 
         self._btn_single = _btn("  Convert File  ", color="#00B4D8", bold=True)
@@ -229,10 +229,10 @@ class ConverterDialog(QDialog):
         self._batch_src = QLineEdit()
         self._batch_src.setPlaceholderText("Select input folder…")
         bf_row.addWidget(self._batch_src)
-        btn_bf = _btn("Browse…")
-        btn_bf.setFixedWidth(80)
-        btn_bf.clicked.connect(self._browse_batch)
-        bf_row.addWidget(btn_bf)
+        self._btn_bf = _btn("Browse…")
+        self._btn_bf.setFixedWidth(80)
+        self._btn_bf.clicked.connect(self._browse_batch)
+        bf_row.addWidget(self._btn_bf)
         root.addLayout(bf_row)
 
         bo_row = QHBoxLayout()
@@ -240,10 +240,10 @@ class ConverterDialog(QDialog):
         self._batch_out = QLineEdit()
         self._batch_out.setPlaceholderText("Output folder (required — originals not touched)…")
         bo_row.addWidget(self._batch_out)
-        btn_bo = _btn("Browse…")
-        btn_bo.setFixedWidth(80)
-        btn_bo.clicked.connect(self._browse_batch_out)
-        bo_row.addWidget(btn_bo)
+        self._btn_bo = _btn("Browse…")
+        self._btn_bo.setFixedWidth(80)
+        self._btn_bo.clicked.connect(self._browse_batch_out)
+        bo_row.addWidget(self._btn_bo)
         root.addLayout(bo_row)
 
         self._btn_batch = _btn("  Convert Folder  ", color="#00B4D8", bold=True)
@@ -316,6 +316,14 @@ class ConverterDialog(QDialog):
 
     # ── Current format / quality ───────────────────────────────────────────
 
+    def _set_all_enabled(self, enabled: bool):
+        for w in [self._btn_single, self._btn_batch,
+                  self._btn_sf, self._btn_so, self._btn_bf, self._btn_bo,
+                  self._fmt_combo, self._quality_spin,
+                  self._single_src, self._single_out,
+                  self._batch_src, self._batch_out]:
+            w.setEnabled(enabled)
+
     def _get_ext_quality(self):
         label = self._fmt_combo.currentText()
         ext, has_quality = FORMATS[label]
@@ -386,8 +394,7 @@ class ConverterDialog(QDialog):
         ext, quality = self._get_ext_quality()
 
         self._running = True
-        self._btn_batch.setEnabled(False)
-        self._btn_single.setEnabled(False)
+        self._set_all_enabled(False)
         self._progress.setValue(0)
         self._log_line(f"Batch: {len(files)} images  →  {out_dir.name}/")
 
@@ -420,8 +427,7 @@ class ConverterDialog(QDialog):
 
     def _on_batch_done(self, ok: int, failed: int):
         self._running = False
-        self._btn_batch.setEnabled(True)
-        self._btn_single.setEnabled(True)
+        self._set_all_enabled(True)
         color = "ok" if failed == 0 else "error"
         self._log_line(
             f"Done — {ok} converted, {failed} failed.", ok=(failed == 0), error=(failed > 0))
