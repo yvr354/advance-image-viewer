@@ -173,7 +173,7 @@ class ConverterDialog(QDialog):
         fq.addWidget(self._quality_label)
         self._quality_spin = QSpinBox()
         self._quality_spin.setRange(1, 100)
-        self._quality_spin.setValue(90)
+        self._quality_spin.setValue(80)
         self._quality_spin.setFixedWidth(70)
         self._quality_spin.setSuffix(" %")
         fq.addWidget(self._quality_spin)
@@ -281,6 +281,7 @@ class ConverterDialog(QDialog):
         self._quality_spin.setEnabled(has_quality)
         self._quality_label.setStyleSheet(
             f"color:{_TEXT};" if has_quality else f"color:{_DIM};")
+        self._quality_spin.setValue(80 if has_quality else 100)
         if ext == "jpg":
             note = "JPG — lossy. Lower % = smaller file, more artefacts. 80% recommended for inspection."
         elif ext == "png":
